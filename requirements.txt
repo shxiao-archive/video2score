@@ -1,0 +1,9 @@
+numpy
+opencv-python
+Pillow
+pymupdf
+curl_cffi
+qrcode
+yt-dlp
+yt-dlp-ejs
+pyguitarpro

@@ -1,0 +1,51 @@
+# 打包 video2score 免安装包：Windows x64、macOS arm64（Apple 芯片）、macOS x64（Intel，macos-15-intel 是最后一个 Intel 镜像）。
+# 手动触发时只上传构建产物；推送 v* 标签（如 v1.0.0）时另外发布成 GitHub Release。
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: 装依赖
+        run: python -m pip install -r requirements.txt -r requirements-build.txt
+      - name: 打包并自检
+        run: python packaging/build.py
+        env:
+          PYTHONIOENCODING: utf-8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video2score-${{ matrix.os }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

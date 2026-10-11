@@ -1,0 +1,19 @@
+# Third-party checkouts. vendor/README.md stays tracked.
+vendor/*/
+
+.venv/
+jobs/
+bilibili_cookie.txt
+__pycache__/
+*.pyc
+
+# Packaging output (packaging/build.py) and a dev-run app's data folder.
+/build/
+/dist/
+/data/
+
+# Test fixtures cut from third-party videos stay local only (not published).
+tests/fixtures/
+
+# 测试和测试素材只留在本地，不公开（会暴露测试用的曲目，素材是第三方视频截图）。
+tests/

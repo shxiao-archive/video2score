@@ -1,0 +1,4 @@
+node_modules/
+# python packaging/build.py --browser 下载的 chrome-headless-shell（开发用，不提交）
+chrome/
+node/

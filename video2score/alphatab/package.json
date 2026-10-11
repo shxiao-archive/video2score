@@ -1,0 +1,10 @@
+{
+  "name": "score-alphatab-render",
+  "private": true,
+  "description": "用 alphaTab 把 Guitar Pro 文件排版成 SVG，再用 Puppeteer 控制无界面 Chrome 打印成 PDF（video2score/engrave.py 调用）",
+  "type": "module",
+  "dependencies": {
+    "@coderline/alphatab": "1.6.3",
+    "puppeteer-core": "25.12.0"
+  }
+}

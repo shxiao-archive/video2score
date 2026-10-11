@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<title>视频转谱</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">视频转谱 <span class="muted">v__VERSION__</span></div>
+  <div class="bar-actions">
+    <button id="login-button" class="ghost">B 站登录</button>
+    <button id="quit-button" class="ghost">退出</button>
+  </div>
+</header>
+
+<main>
+  <div id="notices"></div>
+
+  <section class="card">
+    <h2>新建转谱</h2>
+    <form id="convert-form">
+      <label for="source">视频链接</label>
+      <input id="source" type="text" placeholder="粘贴 B 站链接、BV 号、YouTube 链接或其他视频网站链接" autocomplete="off">
+      <div id="drop" class="drop" tabindex="0">
+        <span id="drop-text">或者把视频文件拖到这里（也可以点这里选择）</span>
+        <input id="file" type="file" accept="video/*,.mp4,.mkv,.mov,.flv,.webm" hidden>
+      </div>
+      <div id="link-row" hidden>
+        <label for="link">原视频链接（选填）</label>
+        <input id="link" type="text" placeholder="填了能补上曲名、原唱，每页页脚印上出处" autocomplete="off">
+      </div>
+      <fieldset class="formats">
+        <legend>导出格式</legend>
+        <label class="check"><input type="checkbox" checked disabled> MusicXML</label>
+        <label class="check"><input type="checkbox" name="export" value="pdf" checked> 排版 PDF</label>
+        <label class="check"><input type="checkbox" name="export" value="gp" checked> GP（.gp）</label>
+        <label class="check"><input type="checkbox" name="export" value="gpx"> GP6（.gpx）</label>
+        <label class="check"><input type="checkbox" name="export" value="gp5"> GP5（.gp5）</label>
+      </fieldset>
+      <p class="muted small">截图谱 PDF（视频截图拼成）总是会生成。谱面区域、谱的种类都自动判断。</p>
+      <div class="row">
+        <button id="start" class="primary" type="submit">开始转谱</button>
+        <span id="upload-status" class="muted small"></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="card" id="tasks-card" hidden>
+    <h2>进行中</h2>
+    <ul id="tasks" class="tasks"></ul>
+  </section>
+
+  <section class="card">
+    <div class="row space">
+      <h2>我的谱</h2>
+      <span id="data-dir" class="muted small"></span>
+    </div>
+    <ul id="jobs" class="jobs"></ul>
+    <p id="jobs-empty" class="muted" hidden>还没有转过谱。</p>
+  </section>
+</main>
+
+<dialog id="detail">
+  <div class="dialog-head">
+    <h2 id="detail-title"></h2>
+    <button class="ghost close" data-close>关闭</button>
+  </div>
+  <div id="detail-body"></div>
+</dialog>
+
+<dialog id="login">
+  <div class="dialog-head">
+    <h2>B 站扫码登录</h2>
+    <button class="ghost close" data-close>关闭</button>
+  </div>
+  <p class="muted small">登录后能下载更高清的视频，识别更准。Cookie 只存在本机的 data/config 里。</p>
+  <div class="qr"><img id="login-qr" alt="登录二维码"></div>
+  <p id="login-status" class="center">正在获取二维码……</p>
+</dialog>
+
+<div id="toast" role="status" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
