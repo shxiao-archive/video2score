@@ -4,7 +4,7 @@ python -m video2score bench-pdf                  全部（复用每个视频最�
 python -m video2score bench-pdf --rerun          重新跑视频
 python -m video2score bench-pdf <曲名> <曲名>     只跑这几首（jobs/_user_test 下的文件夹名）
 
-测试集在 jobs/_user_test/<曲名>/：标准答案（MusicXML 优先，没有就用 Guitar Pro 导出的原谱 PDF），加上视频（source-1080.mp4 或
+测试集在 jobs/_user_test/<曲名>/：标准答案（MusicXML 优先，.musicxml 或 GP8 导出的 .xml；没有就用 Guitar Pro 导出的原谱 PDF），加上视频（source-1080.mp4 或
 source.mp4；没有的话按 source.txt 里的 B 站链接下载成 source.mp4）。每首的明细写到作业目录的 compare.txt。
 """
 
@@ -34,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         if not folder.is_dir() or (wanted and folder.name not in wanted):
             continue
         # 标准答案：有 MusicXML 用 MusicXML（逐音校对过），没有再读原谱 PDF。
-        answers = sorted(folder.glob("*.musicxml")) or sorted(folder.glob("*.pdf"))
+        # GP8 导出的 MusicXML 扩展名是 .xml。
+        answers = sorted(folder.glob("*.musicxml")) or sorted(folder.glob("*.xml")) or sorted(folder.glob("*.pdf"))
         if not answers:
             continue
         started = time.time()
@@ -52,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             reference = read_reference(answers[0])
             structure = align_structure(measures, reference)
             direct = None
-            if answers[0].suffix.lower() == ".musicxml":
+            if answers[0].suffix.lower() in (".musicxml", ".xml"):
                 result = compare_xml(job_dir / "score.musicxml", answers[0])
                 lines = result.core.lines
                 # 再直接对照两个 XML 的原文（双谱表、符杠、符干、闷音、拍号的写法），明细写 xmldiff.txt。

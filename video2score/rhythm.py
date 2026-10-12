@@ -107,8 +107,12 @@ def read_staff_rhythm(
     staff: Staff5,
     bars: tuple[int, int],
     limit: tuple[float, float] | None = None,
+    thick: bool = False,
 ) -> list[Event]:
-    """读五线谱一小节的节奏。limit 是可用的上下范围（不要伸进 TAB）。"""
+    """读五线谱一小节的节奏。limit 是可用的上下范围（不要伸进 TAB）。
+
+    thick：谱面原本很小、放大过才识别的（survey 的小谱面模式）。原图一个像素的笔画放大后有两三个像素，相对线距比一般的谱粗。
+    """
     spacing = staff.spacing
     top = int(max(0, staff.top - 4.0 * spacing))
     bottom = int(min(image.shape[0], staff.bottom + 4.0 * spacing))
@@ -128,7 +132,7 @@ def read_staff_rhythm(
     heads = _noteheads(ink, spacing, left_bar, right_bar)
     heads = _drop_beam_heads(ink, heads, stems, spacing)
     heads = _check_whole_heads(ink, heads, stems, lines, spacing)
-    heads = sorted(heads + _hollow_heads_on_stems(ink, stems, heads, lines, spacing))
+    heads = sorted(heads + _hollow_heads_on_stems(ink, stems, heads, lines, spacing, thick))
     for head in heads:
         event = _head_event(no_lines, ink, head, stems, spacing, used, solid, middle=lines[2])
         if event is None:
@@ -365,6 +369,7 @@ def _hollow_heads_on_stems(
     heads: list[tuple[float, float, bool]],
     lines: list[float],
     spacing: float,
+    thick: bool = False,
 ) -> list[tuple[float, float, bool]]:
     """没配上符头的符干，看它两端有没有空心符头（二分音符）。
 
@@ -379,8 +384,11 @@ def _hollow_heads_on_stems(
             continue
         best: tuple[float, float, float] | None = None
         # 符干接在符头中部：朝下的符干上端、朝上的符干下端，和符头中心差不多高（往符干里偏一点）。
-        for side, end, shifts in ((1, y0, np.arange(-0.3, 0.21, 0.1)), (-1, y1, np.arange(-0.2, 0.31, 0.1))):
-            for dx in np.arange(0.4, 0.8, 0.1):
+        # 放大过的小谱面（thick）：符干末端能伸到符头中心再往里 0.4 个线距；环有两三个像素粗，按 0.1 个线距（一个多像素）
+        # 一步挪可能正好错过最贴的位置，改按 0.05 挪。一般的谱不这样找：背景杂的视频里这样会多找出假的空心符头。
+        inward, step = (0.4, 0.05) if thick else (0.2, 0.1)
+        for side, end, shifts in ((1, y0, np.arange(-0.3, inward + 0.01, step)), (-1, y1, np.arange(-inward, 0.31, step))):
+            for dx in np.arange(0.4, 0.8, step):
                 for dy in shifts:
                     cx, cy = x + side * dx * spacing, end + dy * spacing
                     score = _ring_score(ink, grown, line_rows, cx, cy, spacing)
@@ -445,11 +453,18 @@ def _head_event(
     head_x, head_y, hollow = head
     crossed = False
     stem = None
+    # 两根都挨着时，先要摆法对的：符干朝上画在符头右边，朝下画在左边。两道符尾挨得近、笔画粗（放大过的小谱面）时
+    # 右端会连成一道竖笔，离符头中心可能比真符干还近一点。
+    def rank(candidate: tuple[int, int, int]) -> tuple[bool, float]:
+        x, y0, y1 = candidate
+        up = abs(head_y - y1) < abs(head_y - y0)
+        return ((x >= head_x) != up, abs(x - head_x))
+
     for x, y0, y1 in stems:
         if abs(x - head_x) > 0.9 * spacing:
             continue
         if y0 - 0.6 * spacing <= head_y <= y1 + 0.6 * spacing:
-            if stem is None or abs(x - head_x) < abs(stem[0] - head_x):
+            if stem is None or rank((x, y0, y1)) < rank(stem):
                 stem = (x, y0, y1)
     # 实心符头一定有符干。没有符干的实心块是升号的交叉处、连线的粗段，不是音符。
     if stem is None and not hollow:
@@ -867,7 +882,8 @@ def _rests(
             rests.append(_rest(free, x, y, width, height, spacing, centre_x, Fraction(1, 1) if whole else Fraction(1, 2)))
             continue
         # 十六分休止也有两个半线距高，但比四分休止宽（1.2 个线距以上）、矮一点、墨稀：按圆头数。
-        if 2.2 * spacing <= height < 2.85 * spacing and 1.2 * spacing <= width <= 1.5 * spacing and fill < 0.36:
+        # 墨占外框三成多（谱面小、放大后笔画糊开一点能到 0.37），四分休止在 0.45 以上。
+        if 2.2 * spacing <= height < 2.85 * spacing and 1.2 * spacing <= width <= 1.5 * spacing and fill < 0.42:
             knobs = _knobs(labels[y : y + height, x : x + width] == index, spacing)
             duration = Fraction(1, 16) if knobs >= 2 else Fraction(1, 8)
             rests.append(_rest(free, x, y, width, height, spacing, centre_x, duration))

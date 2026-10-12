@@ -75,8 +75,13 @@ def video_info(video_path: Path) -> tuple[float, int]:
 def score_box(
     rgb: np.ndarray,
     ratios: tuple[float | None, float | None, float | None, float | None] = (None, None, None, None),
+    page: bool = False,
 ) -> tuple[int, int, int, int] | None:
-    """谱面在帧里的方框 (x0, y0, x1, y1)。给了比例就按比例，否则按谱线找。找不到返回 None。"""
+    """谱面在帧里的方框 (x0, y0, x1, y1)。给了比例就按比例，否则按谱线找。找不到返回 None。
+
+    page：事先看过是整页视图（survey）。这时只要有包住谱线的白纸就框白纸，不再要求四周是深色界面
+    （打谱软件窗口的角上有图标、按钮，不一定暗）。
+    """
     height, width = rgb.shape[:2]
     if any(value is not None for value in ratios):
         x0, y0, x1, y1 = ratios
@@ -90,11 +95,18 @@ def score_box(
     systems = legacy_systems(gray)
     if not systems:
         return None
-    page = _white_page_box(gray, systems)
-    box = page if page is not None else _band_box(gray, _best_cluster(systems))
+    page_box = _white_page_box(gray, systems, chrome=not page)
+    box = page_box if page_box is not None else _band_box(gray, _best_cluster(systems))
     if box[2] - box[0] < 20 or box[3] - box[1] < 20:
         return None
     return box
+
+
+def page_box(rgb: np.ndarray) -> tuple[int, int, int, int] | None:
+    """包住谱线、左右不贯通画面的白纸（打谱软件的整页视图）。没有返回 None。"""
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    systems = legacy_systems(gray)
+    return _white_page_box(gray, systems, chrome=False) if systems else None
 
 
 def crop_score_page(image: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
@@ -157,9 +169,15 @@ def _band_box(
 def _white_page_box(
     gray: np.ndarray,
     systems: list[tuple[float, float, float, int]],
+    chrome: bool = True,
 ) -> tuple[int, int, int, int] | None:
-    """深色界面里、包住谱线的白纸。满幅亮底或小亮斑不算。"""
-    if not _dark_chrome(gray):
+    """深色界面里、包住谱线的白纸。满幅亮底或小亮斑不算。
+
+    chrome=False（整页视图）：不查四周是不是深色界面；白纸可以碰到画面上下沿（翻页、滚动时一张纸只露出一截）、
+    一侧粘上界面上浅色的滚动条（框的左右两边不够白的列由 _trim_white_page 去掉），
+    上下叠着露出两张纸时框住两张（中间的灰缝由 measures._band_edges 挡在小节外面）。
+    """
+    if chrome and not _dark_chrome(gray):
         return None
     height, width = gray.shape
     mask = np.where(gray >= 200, np.uint8(255), np.uint8(0))
@@ -170,11 +188,15 @@ def _white_page_box(
     best: tuple[int, int, int, int] | None = None
     best_count = 0
     best_area = 0
+    pages: list[tuple[int, int, int, int]] = []
     for contour in contours:
         x, y, box_w, box_h = (int(value) for value in cv2.boundingRect(contour))
         if box_w < width * 0.4 or box_h < 20:
             continue
-        if x <= 8 or y <= 8 or x + box_w >= width - 8 or y + box_h >= height - 8:
+        if chrome and (x <= 8 or y <= 8 or x + box_w >= width - 8 or y + box_h >= height - 8):
+            continue
+        # 整页视图：纸的一侧可能和界面上浅色的滚动条连成一片（修边以后再查左右边沿），但不会左右都贯通（那是横贯画面的谱带）。
+        if not chrome and x <= 8 and x + box_w >= width - 8:
             continue
         count = sum(
             1
@@ -182,13 +204,22 @@ def _white_page_box(
             if y <= (top + bottom) / 2.0 <= y + box_h and x <= width / 2 <= x + box_w
         )
         area = box_w * box_h
+        if count:
+            pages.append((x, y, x + box_w, y + box_h))
         if count > best_count or (count == best_count and count and area > best_area):
             best = (x, y, x + box_w, y + box_h)
             best_count = count
             best_area = area
     if best_count == 0 or best is None:
         return None
-    return _trim_white_page(gray, best, systems)
+    if not chrome:
+        stacked = [box for box in pages if min(box[2], best[2]) - max(box[0], best[0]) >= 0.8 * (best[2] - best[0])]
+        best = (min(box[0] for box in stacked), min(box[1] for box in stacked), max(box[2] for box in stacked), max(box[3] for box in stacked))
+    trimmed = _trim_white_page(gray, best, systems)
+    if not chrome and (trimmed[0] <= 8 or trimmed[2] >= width - 8):
+        # 修掉两边不够白的列以后还碰着画面左右沿：是贴着画面边上的白底（谱带旁边的白色竖栏），不是软件界面里的一张纸。
+        return None
+    return trimmed
 
 
 def _trim_white_page(
@@ -196,7 +227,7 @@ def _trim_white_page(
     box: tuple[int, int, int, int],
     systems: list[tuple[float, float, float, int]],
 ) -> tuple[int, int, int, int]:
-    """白纸框的外沿会粘上标题栏和时间轴，把两端不够白的行去掉。"""
+    """白纸框的外沿会粘上标题栏和时间轴，把两端不够白的行去掉；左右粘上的水印、按钮，把两边不够白的列去掉。"""
     x0, y0, x1, y1 = box
     if y1 - y0 < 16:
         return box
@@ -218,7 +249,15 @@ def _trim_white_page(
         bottom -= 1
     if bottom - top < 20:
         return box
-    return (x0, y0 + top, x1, y0 + bottom)
+    columns = (gray[y0 + top : y0 + bottom, x0:x1] >= 200).mean(axis=0)
+    left, right = 0, len(columns)
+    while left < right and float(columns[left]) < 0.5:
+        left += 1
+    while right > left and float(columns[right - 1]) < 0.5:
+        right -= 1
+    if right - left < 20:
+        return (x0, y0 + top, x1, y0 + bottom)
+    return (x0 + left, y0 + top, x0 + right, y0 + bottom)
 
 
 def _dark_chrome(gray: np.ndarray) -> bool:

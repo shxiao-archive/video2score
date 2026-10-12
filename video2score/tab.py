@@ -217,6 +217,10 @@ def read_frets(
         for first, second in zip(ordered, ordered[1:]):
             if first.slide and not first.slide_next and first.slide_x is not None and second.left - first.slide_x <= 1.2 * typical:
                 first.slide_next = True
+            elif first.slide is None and second.slide_in is not None and second.left - first.right <= 2.0 * typical:
+                # 斜线和后一个数字分在了一组（只看间距，和前一个数字隔得稍远一点就这样）：夹在两个挨着的音中间，是两音之间的。
+                first.slide, first.slide_x, first.slide_next = second.slide_in, (first.right + second.left) / 2.0, True
+                second.slide_in = None
             elif first.slide is None and second.slide_in is None:
                 _between_slide(image, staff, first, second)
         # 这根弦上最后一个音后面一直伸到小节线的斜线：连奏滑音连到下一小节（斜线贴着弦线，找字块时被当成弦线抹掉了）。
@@ -1073,6 +1077,8 @@ def classify(canvas: np.ndarray, bank: Bank, narrow: bool | None = None) -> tupl
 
 # 相关值差距到这么大就直接用；不到就改用倒角距离在前几名里裁决。
 _CLEAR_MARGIN = 0.08
+# 两类的平均字形相关值到这么高，算同一个数字。
+_TWIN = 0.92
 
 
 def _chamfer_decide(
@@ -1150,6 +1156,13 @@ def adapted_tab_bank(
     claimed: list[tuple[str, np.ndarray]] = []
     own: list[tuple[str, np.ndarray]] = []
     for centroid, _label, top, margin in sorted(labelled, key=lambda item: -item[3]):
+        # 和已经定好的一类几乎一样：同一个数字被贪心聚类分成了两类（谱面小、放大以后，同一个数字落在原图像素格上的位置不同，
+        # 糊开的样子也不同），跟它定同一个数字。单独定的话把握小的这一类可能被认成别的数字（8 认成 6）。
+        twin = max(((_glyph_corr(centroid, other), label) for label, other in claimed), default=None)
+        if twin is not None and twin[0] >= _TWIN and top >= MIN_SCORE:
+            claimed.append((twin[1], centroid))
+            own.append((twin[1], centroid))
+            continue
         scores = _digit_scores(centroid, bank)
         for label, score in sorted(scores.items(), key=lambda item: -item[1])[:3]:
             # 退到下一个数字只在它和最像的那个差不多、这一类字形本身又清楚时才行（MuseScore 的 9 和 0 只差 0.01）。不硬给：
@@ -1168,6 +1181,7 @@ def adapted_tab_bank(
             own.append((label, centroid))
             break
     return tuple(own) + bank
+
 
 
 def _digit_scores(canvas: np.ndarray, bank: Bank) -> dict[str, float]:
@@ -1338,10 +1352,13 @@ def mark_arcs(image: np.ndarray, staff: TabStaff, notes: list[FretNote], bars: t
                         else:
                             first.arc_next = True
     # 斜线上方 TAB 外面印着 "sl."：连奏滑音（GP 只写滑音；数字下面另画了弧线的才另写连线）。
-    # 小节最后一个音的斜线（连到下一小节的音）也看。
+    # 小节最后一个音的斜线（连到下一小节的音）也看。"sl." 印在斜线中段上方，斜线长（一直伸到小节线）时离中点可能有两三个线距：
+    # 整段斜线（从这个音到同一根弦上的下一个音或小节线）上方都找。
     for note in notes:
-        if note.slide and note.slide_x is not None and _legato_text(ink, staff, note.slide_x):
-            note.legato = True
+        if note.slide and note.slide_x is not None:
+            end = min((other.left for other in notes if other.string == note.string and other.left > note.right), default=bars[-1] if bars else note.slide_x)
+            span = (min(note.slide_x - 1.5 * spacing, note.right), max(note.slide_x + 1.5 * spacing, end))
+            note.legato = note.legato or _legato_text(ink, staff, span)
 
 
 def _cut_arc(window: np.ndarray, xa: float, xb: float, spacing: float) -> bool:
@@ -1367,18 +1384,21 @@ def _cut_arc(window: np.ndarray, xa: float, xb: float, spacing: float) -> bool:
     return any(abs(a - b) <= 1 for a in lefts for b in rights)
 
 
-def _legato_text(ink: np.ndarray, staff: TabStaff, x: float) -> bool:
+def _legato_text(ink: np.ndarray, staff: TabStaff, span: tuple[float, float]) -> bool:
     """TAB 上方、斜线附近的 "sl."：一个细高的 l，左边挨着一个矮的 s 或右边挨着一个小点。
 
     H、P（击勾弦）是一整块、比 l 宽；五线谱伸下来的符干比一个线距长，都不算。
     """
     spacing = staff.spacing
     y0, y1 = max(0, int(staff.top - 2.5 * spacing)), max(0, int(staff.top - 0.3 * spacing))
-    x0, x1 = max(0, int(x - 1.5 * spacing)), min(ink.shape[1], int(x + 1.5 * spacing))
+    x0, x1 = max(0, int(span[0])), min(ink.shape[1], int(span[1]))
     if y1 <= y0 or x1 <= x0:
         return False
-    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(ink[y0:y1, x0:x1], connectivity=8)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(ink[y0:y1, x0:x1], connectivity=8)
     pieces = [tuple(int(value) for value in stats[index]) for index in range(1, count) if stats[index][4] >= 2]
+    for index in range(1, count):
+        if _joined_sl(labels == index, tuple(int(value) for value in stats[index]), spacing):
+            return True
     for lx, ly, lw, lh, _area in pieces:
         if not (0.4 * spacing <= lh <= 1.0 * spacing and lw <= 0.3 * spacing):
             continue
@@ -1392,6 +1412,19 @@ def _legato_text(ink: np.ndarray, staff: TabStaff, x: float) -> bool:
             if s_left or dot_right:
                 return True
     return False
+
+
+def _joined_sl(mask: np.ndarray, box: tuple[int, int, int, int, int], spacing: float) -> bool:
+    """连成一块的 "sl."（谱面小、放大后 s、l、点粘在一起）：左边几列只有下半截有墨（s），右边有一道从顶到底的竖笔（l）。
+    H、P 左边那道竖笔也是从顶到底的，不算。"""
+    x, y, width, height, _area = box
+    if not (0.5 * spacing <= height <= 1.1 * spacing and 0.35 * spacing <= width <= 0.9 * spacing):
+        return False
+    part = mask[y : y + height, x : x + width]
+    tops = np.array([np.flatnonzero(column)[0] if column.any() else height for column in part.T])
+    low = tops >= 0.35 * height
+    left = max(2, int(round(0.3 * width)))
+    return bool(low[:left].all() and (tops[left:] <= 0.15 * height).any())
 
 
 def _arcs(window: np.ndarray, side: int, spacing: float, min_width: float = 1.0) -> list[tuple[int, int]]:
@@ -1564,8 +1597,13 @@ def vibratos(image: np.ndarray, staff: TabStaff, bars: tuple[int, int] | None = 
     return found
 
 
-def bends(image: np.ndarray, staff: TabStaff, bank: Bank, bars: tuple[int, int] | None = None) -> list[tuple[float, float]]:
+def bends(
+    image: np.ndarray, staff: TabStaff, bank: Bank, bars: tuple[int, int] | None = None, ceiling: float | None = None
+) -> list[tuple[float, float]]:
     """TAB 上方的推弦箭头：(箭头尖的横坐标, 推多少半音)。
+
+    ceiling：上面五线谱的下沿（不往上找过它）。五线谱和 TAB 挨得近时（整页视图），压在五线谱最下面那条线上的实心符头
+    顶上尖、往下变宽，像个箭头。
 
     GP 从音的右边画一道往上弯的线，顶上一个实心箭头，箭头上面标推几个全音（¼、½、¾、full）。弯线常跨过小节线，
     箭头落在下一小节里，所以这里只找箭头和标注，归到哪个音由 tabscore 按位置往前找。
@@ -1573,7 +1611,7 @@ def bends(image: np.ndarray, staff: TabStaff, bank: Bank, bars: tuple[int, int] 
     标注：箭头上方 1.5 个线距以内的两个小数字（分子、分母）；没有数字的是 full。MusicXML 的 bend-alter 是半音数，等于全音数的两倍。
     """
     spacing = staff.spacing
-    y0 = max(0, int(staff.top - 4.0 * spacing))
+    y0 = max(0, int(staff.top - 4.0 * spacing), int(np.ceil(ceiling)) if ceiling is not None else 0)
     y1 = max(y0, int(staff.top - 0.2 * spacing))
     x0, x1 = (bars[0], bars[-1]) if bars else (0, image.shape[1])
     ink = (image[y0:y1, x0:x1] < 128).astype(np.uint8)

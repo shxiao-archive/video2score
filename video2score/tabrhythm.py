@@ -404,7 +404,12 @@ def time_signature(
         height = min(
             max(item[3] for item in half) - min(item[1] for item in half) for half in (upper, lower)
         )
-        if height >= tall * spacing:
+        # 拍号的分母撑满下半个谱表，一直到最下面那条线；小节线后面紧挨着的八分音符（粗的符尾头在上、符头在下）够不着。
+        reaches = max(item[3] for item in lower) >= staff.lines[-1] - y0 - 0.5 * spacing
+        # 分子、分母上下对齐；八分音符的符尾在符头右上方，偏出半个线距以上。
+        centre = [(min(item[0] for item in half) + max(item[2] for item in half)) / 2.0 for half in (upper, lower)]
+        aligned = abs(centre[0] - centre[1]) <= 0.35 * spacing
+        if height >= tall * spacing and reaches and aligned:
             found = (left, right)
             break
     if found is None:

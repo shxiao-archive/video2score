@@ -292,6 +292,8 @@ def _match_motion(
         support = 0
         conflicts = 0
         expected = 0
+        # 两边都读出了号（读得不太准也算）的配对里，号一样的和不一样的各几对。
+        agree = disagree = 0
         used: set[int] = set()
         for b in new:
             left = b.left - dx
@@ -312,6 +314,11 @@ def _match_motion(
                     support += 1
                     if _numbers_differ(a, b) or (not labels_agree(a, b) and not _numbers_same(a, b)):
                         conflicts += 1
+                    if a.number is not None and b.number is not None and min(a.number_score, b.number_score) >= _READ:
+                        # 一边被截掉了前面的位（146 读成 46）也算一样。
+                        same = str(a.number).endswith(str(b.number)) or str(b.number).endswith(str(a.number))
+                        agree += same
+                        disagree += not same
                     break
         if support == 0 or support < 0.6 * expected:
             continue
@@ -324,6 +331,12 @@ def _match_motion(
         # 新页常正好能挪一下对上两个小节，号只读准了一个。
         still = abs(dx) <= tol_x and abs(dy) <= tol_y
         if conflicts * 2 > support or (conflicts and conflicts * 2 == support and not still):
+            continue
+        # 谱面很小（线距七八个像素）时号读得都不太准，单看哪一对都不够"一定不同"；但真是同一批小节的话，
+        # 两边读出的号大多该一样。读出号的配对里不一样的有两对以上、还比一样的多，就是翻到了一段长得一样的新小节
+        # （整页视图里第 1 页末尾和第 2 页开头是同一段，翻页时被当成往上挪了一行，一整页小节被并掉）。
+        # 只管挪动了的位移：画面没动时号常读得不准（有的视频静止的几帧里号一半读错），不能拿它否掉"没动"。
+        if not still and disagree >= 2 and disagree > agree:
             continue
         # 谱是往左、往上走的。往回走的位移只在没有别的解释时才用。
         # 然后对上的越多越好，小节号冲突的越少越好（音符一样的相邻小节靠它分开）；
@@ -374,6 +387,10 @@ def _numbers_differ(left: Measure, right: Measure) -> bool:
     if left.number is None or right.number is None or left.number == right.number:
         return False
     return min(left.number_score, right.number_score) >= 0.7
+
+
+# 比较配对的号是否一致时，读数要有这么有把握才算"读出了号"。
+_READ = 0.6
 
 
 def _numbers_same(left: Measure, right: Measure) -> bool:

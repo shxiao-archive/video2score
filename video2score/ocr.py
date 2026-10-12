@@ -127,7 +127,22 @@ def read_label(
     if found is None:
         return None
     blob, bx, by = found
-    boxes = _split_digits(blob)
+    # 粘连的几位按字宽在最窄处切开；切点差一两个像素就可能把 4 的横笔切给前一位、剩下半个像 1。
+    # 切点左右挪一两个像素各读一遍，取每一位都认得最像的那种切法。
+    best: Reading | None = None
+    tried: list[list[tuple[int, int, int, int]]] = []
+    for shift in (0, -1, 1, -2, 2):
+        boxes = _split_digits(blob, shift)
+        if boxes in tried:
+            continue
+        tried.append(boxes)
+        reading = _read_boxes(label, boxes, bx, by, bank)
+        if reading is not None and (best is None or reading.score > best.score):
+            best = reading
+    return best
+
+
+def _read_boxes(label: np.ndarray, boxes: list[tuple[int, int, int, int]], bx: int, by: int, bank: Bank) -> Reading | None:
     if not 1 <= len(boxes) <= 3:
         return None
     digits: list[int] = []
@@ -202,8 +217,8 @@ def _pick_blob(
     return None if best is None else best[1]
 
 
-def _split_digits(blob: np.ndarray) -> list[tuple[int, int, int, int]]:
-    """按列投影在空白处切开；粘连的两位按字宽在最窄处再切。
+def _split_digits(blob: np.ndarray, shift: int = 0) -> list[tuple[int, int, int, int]]:
+    """按列投影在空白处切开；粘连的两位按字宽在最窄处再切（切点再往右挪 shift 个像素）。
 
     返回每一位的 (y0, y1, x0, x1)，按这一位自己的笔画裁紧。
     """
@@ -232,7 +247,7 @@ def _split_digits(blob: np.ndarray) -> list[tuple[int, int, int, int]]:
         for part in range(1, parts):
             centre = int(round((right - left) * part / parts))
             lo, hi = max(1, centre - 2), min(right - left - 1, centre + 3)
-            cuts.append(left + lo + int(np.argmin(profile[lo:hi])))
+            cuts.append(left + min(right - left - 1, max(1, lo + int(np.argmin(profile[lo:hi])) + shift)))
         cuts.append(right)
         split.extend(zip(cuts, cuts[1:]))
     boxes: list[tuple[int, int, int, int]] = []

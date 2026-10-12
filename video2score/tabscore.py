@@ -155,9 +155,12 @@ def read_job(job_dir: Path) -> list[ScoreMeasure]:
     loaded = _cut_merged(loaded)
     library = [record for record, *_rest in loaded]
     starts = _content_starts(loaded)
+    thick = _upscaled(job_dir)
+    opening = _opening_key(loaded)
     bank = adapted_tab_bank([(images[0], tab, tuple(record["bars"])) for record, images, tab, _staff, _clean in loaded if tab])
     candidates = [
-        _read_measure(record, images, tab, staff, bank, clean, start) for (record, images, tab, staff, clean), start in zip(loaded, starts)
+        _read_measure(record, images, tab, staff, bank, clean, start, thick, opening)
+        for (record, images, tab, staff, clean), start in zip(loaded, starts)
     ]
     measures = _choose(candidates)
     for measure, record in zip(measures, library):
@@ -282,6 +285,26 @@ def _drop_held_tail(measures: list[ScoreMeasure], least: int = 3) -> list[ScoreM
     return measures[:end]
 
 
+def _opening_key(loaded: list[tuple]) -> int | None:
+    """第一个有五线谱的小节开头印的调号（升号数为正、降号数为负）。"""
+    for record, images, _tab, staff, clean in loaded:
+        if staff is None or not images:
+            continue
+        image = clean if clean is not None else images[0]
+        found = key_signature(image, list(staff.lines), staff.spacing, record["bars"][0], record["bars"][-1])
+        return found[0] if found is not None else None
+    return None
+
+
+def _upscaled(job_dir: Path) -> bool:
+    """这个作业的谱面是不是放大过才识别的（survey 判断的小谱面模式，记在 manifest 里）。"""
+    path = job_dir / "manifest.json"
+    if not path.is_file():
+        return False
+    mode = json.loads(path.read_text(encoding="utf-8")).get("sampling", {}).get("mode") or {}
+    return float(mode.get("scale", 1.0)) > 1.0
+
+
 def _read_measure(
     record: dict,
     images: list[np.ndarray],
@@ -290,6 +313,8 @@ def _read_measure(
     bank: Bank,
     clean: np.ndarray | None = None,
     start: int | None = None,
+    thick: bool = False,
+    opening: int | None = None,
 ) -> list[tuple[int, ScoreMeasure]]:
     """一小节几帧各读一遍，返回不同的读法和各自的票数（参考帧的读法排在最前）。
 
@@ -342,11 +367,18 @@ def _read_measure(
     limit = (0, tab.top - 1.2 * tab.spacing)
     # 小节开头印的调号（行首、行中转调）：记下来，升降号那一段不读音。
     key = key_signature(clean if clean is not None and clean.shape == image.shape else image, list(staff.lines), staff.spacing, bars[0], bars[-1])
+    if key is None and clean is not None and opening is not None:
+        # 清洗图上没认出调号（多帧合成时升号的竖笔偶尔对不齐）：一半以上的原图认出开头那个调号，就是行首重印的调号。
+        # 别的调号不这样补：小节线后面紧挨着的八分音符（竖的符干加符尾）在几帧原图里会像个降号。
+        found = [key_signature(frame, list(staff.lines), staff.spacing, bars[0], bars[-1]) for frame in images]
+        same = [item for item in found if item is not None and item[0] == opening]
+        if len(same) * 2 > len(images):
+            key = max(same, key=lambda item: item[1])
     if key is not None:
         start = max(start or 0, key[1])
     # 清洗图也当一帧读：只有一两帧原图时，原图上被背景盖住的音清洗图上常常是好的。
     frames = images + ([clean] if clean is not None and clean.shape == image.shape else [])
-    results = [read_staff_rhythm(frame, staff, bars, limit=limit) for frame in frames]
+    results = [read_staff_rhythm(frame, staff, bars, limit=limit, thick=thick) for frame in frames]
     # 跳音的小点、重音记号按帧投票：背景里的碎块、连线的尖头只在一两帧里像个孤立的小点。重音取多数帧认出的那种。
     for attribute, absent in (("staccato", False), ("accent", None)):
         marked = [[(event.x, getattr(event, attribute)) for event in found if getattr(event, attribute)] for found in results]
@@ -358,7 +390,8 @@ def _read_measure(
     letters = [bass_attacks(frame, tab, (bars[0], bars[-1])) for frame in frames]
     waves = [vibratos(frame, tab, (bars[0], bars[-1])) for frame in frames]
     holds = [fermatas(frame, staff, (bars[0], bars[-1])) for frame in frames]
-    arrows = _vote_bends([bends(frame, tab, bank, (bars[0], bars[-1])) for frame in frames], tab.spacing)
+    ceiling = staff.bottom + 0.6 * staff.spacing
+    arrows = _vote_bends([bends(frame, tab, bank, (bars[0], bars[-1]), ceiling) for frame in frames], tab.spacing)
     out = []
     for votes, events in _distinct(results, lambda found: tuple((e.duration, e.rest) for e in found), positions=lambda found: [e.x for e in found]):
         if meter is not None and span is not None:
@@ -366,6 +399,12 @@ def _read_measure(
         if start is not None:
             # 行首的谱号、调号那一段：升降号常被认成休止符。
             events = [event for event in events if event.x > start]
+        for tip, _amount in arrows:
+            # 推弦在五线谱上画成推到的音：被推的音右边一个小符头（常带还原号、升号），正对着 TAB 上的箭头。
+            # 从被推的音到箭头尖右边一点，这一段认出来的"休止符"是它们。
+            bent = max((event.x for event in events if not event.rest and event.x < tip), default=None)
+            if bent is not None:
+                events = [event for event in events if not (event.rest and bent < event.x <= tip + 0.5 * staff.spacing)]
         notes, issues = _pair(
             events, groups, tab.spacing, staff, lambda x: stem_event(image, staff, bars, x, limit) or whole_event(image, staff, x, limit), reserve
         )

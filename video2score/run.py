@@ -23,6 +23,7 @@ from video2score.order import arrange, gaps, rescue
 from video2score.tabscore import estimate_tempo, read_job, score_marks, write_musicxml
 from video2score.tabscore import summary as tab_summary
 from video2score.source import classify_source, fetch_video
+from video2score.survey import survey
 from video2score.track import Slot, Tracker, fragments, ordered_slots, summary
 from video2score.videoinfo import VideoInfo, lookup
 
@@ -66,8 +67,11 @@ def run(
         video_of(manifest, options.link, say)
         title, artist, credit = score_info(manifest)
         fps, frame_count = video_info(video)
+        say("看谱面是哪一种……")
+        mode = survey(video, start_sec=options.start_sec, end_sec=options.end_sec, ratios=options.ratios)
+        say(f"  {mode.describe()}")
         tracker = Tracker()
-        finder = MeasureFinder(options.ratios)
+        finder = MeasureFinder(options.ratios, mode.scale, mode.layout == "page")
         sampled = 0
         say("逐帧找小节……")
         for frame in iter_frames(
@@ -87,6 +91,7 @@ def run(
             "frames": sampled,
             "fps": round(fps, 3),
             "polarity": finder.polarity,
+            "mode": mode.to_json(),
             "transitions": summary(tracker),
         }
         slots = ordered_slots(tracker)

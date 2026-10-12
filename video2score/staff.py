@@ -80,9 +80,9 @@ class System:
         )
 
 
-def find_staves(gray: np.ndarray) -> list[Staff]:
-    """先收六条，再收五条、四条等距长线。"""
-    centers = line_centers(gray)
+def find_staves(gray: np.ndarray, cover: float = 0.40) -> list[Staff]:
+    """先收六条，再收五条、四条等距长线。cover 见 line_centers。"""
+    centers = line_centers(gray, cover)
     if len(centers) < 4:
         return []
     height = gray.shape[0]
@@ -90,7 +90,7 @@ def find_staves(gray: np.ndarray) -> list[Staff]:
     found: list[tuple[float, ...]] = []
     thin = _thin_dark(gray)
     # 每条线这一行（上下各多看一行）里细横线占多少、最长的一段有多长。
-    cover = [_row_extent(thin, y) for y in centers]
+    extents = [_row_extent(thin, y) for y in centers]
 
     def accept(count: int) -> None:
         candidates: list[tuple[bool, float, int]] = []
@@ -106,7 +106,7 @@ def find_staves(gray: np.ndarray) -> list[Staff]:
                 continue
             # 一头是一排加线的：六条的不要（会把五线谱吃掉，当成六弦 TAB），五条、四条的排到后面，
             # 让错开一条、不带这排加线的那组先挑（真的弦线被品位数字截得很碎时，没有别的组和它抢，照样收）。
-            ledger = _ledger_end(cover[start : start + count], median)
+            ledger = _ledger_end(extents[start : start + count], median)
             if ledger and count == 6:
                 continue
             tightness = sum((gap - median) ** 2 for gap in gaps)
@@ -149,10 +149,10 @@ def _ledger_end(cover: list[tuple[float, int]], spacing: float) -> bool:
     return any(fraction < 0.75 * middle and longest < 2.5 * spacing for fraction, longest in (cover[0], cover[-1]))
 
 
-def find_systems(rgb: np.ndarray) -> list[System]:
-    """把谱线组配成谱行，并找每行的小节线。"""
+def find_systems(rgb: np.ndarray, cover: float = 0.40) -> list[System]:
+    """把谱线组配成谱行，并找每行的小节线。cover 见 line_centers。"""
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    staves = _mark_five_string_tab(find_staves(gray))
+    staves = _mark_five_string_tab(find_staves(gray, cover))
     if not staves:
         return []
     ink = bar_ink(rgb, gray, staves)
@@ -370,16 +370,16 @@ def chroma(rgb: np.ndarray) -> np.ndarray:
     return cv2.subtract(cv2.max(cv2.max(red, green), blue), cv2.min(cv2.min(red, green), blue))
 
 
-def line_centers(gray: np.ndarray) -> list[float]:
+def line_centers(gray: np.ndarray, cover: float = 0.40) -> list[float]:
     """两侧都更亮的细横线。色块边缘只有一侧更亮，不收。
 
-    谱线常被音符截成短段，不能要求一整行连续。这一行里细线像素够多即可。
+    谱线常被音符截成短段，不能要求一整行连续。这一行里细线像素够多（占宽度的 cover）即可。
     """
     height, width = gray.shape
     if width < 16 or height < 16:
         return []
     fraction = _thin_dark(gray).mean(axis=1)
-    rows = [index for index, value in enumerate(fraction) if value >= 0.40]
+    rows = [index for index, value in enumerate(fraction) if value >= cover]
     if not rows:
         return []
     clusters: list[list[int]] = [[rows[0]]]

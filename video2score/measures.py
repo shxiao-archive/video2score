@@ -22,6 +22,8 @@ LABEL_BELOW = 0.15
 # 行首小节的号：谱号、调号、拍号右端往左、往右各几个线距。
 HEAD_LABEL_LEFT = 1.0
 HEAD_LABEL_RIGHT = 4.5
+# 整页模式下，一行里细横线占纸宽这么多就算谱线。
+_PAGE_COVER = 0.2
 # 签名图的线距。要能分出 TAB 上的 3 和 5、符头差半个线距；再细就会被压缩噪点拖累。
 _SIGNATURE_SPACING = 8.0
 
@@ -90,13 +92,29 @@ class FrameMeasures:
 def frame_measures(
     frame: Frame,
     ratios: tuple[float | None, float | None, float | None, float | None] = (None, None, None, None),
+    scale: float = 1.0,
+    page: bool = False,
 ) -> FrameMeasures | None:
-    box = score_box(frame.rgb, ratios)
+    """scale > 1：谱面太小，找到谱面框以后把框里放大这么多倍再找（见 survey）。之后的坐标都是放大后的整帧坐标。
+    page：整页视图，谱面框框整张白纸。"""
+    box = score_box(frame.rgb, ratios, page)
     if box is None:
         return None
     x0, y0, x1, y1 = box
     crop = np.ascontiguousarray(frame.rgb[y0:y1, x0:x1])
-    systems = find_systems(crop)
+    if scale != 1.0:
+        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        x0, y0 = int(round(x0 * scale)), int(round(y0 * scale))
+        x1, y1 = x0 + crop.shape[1], y0 + crop.shape[0]
+        box = (x0, y0, x1, y1)
+    # 整页视图的谱面框是整张纸：最后一行常常没排满（只剩几个小节），谱线只占纸宽的三四成。
+    systems = find_systems(crop, _PAGE_COVER if page else 0.40)
+    if page and len(systems) > 1:
+        # 整页视图每一行谱的结构都一样（比如五线谱 + TAB）。最上、最下那行线数比别的行少，是被画面边沿切掉了一截
+        # （只露出五线谱或只露出 TAB，符干还会被当成小节线），这一帧不收，等它整行出现。
+        lines = [sum(staff.count for staff in system.staves) for system in systems]
+        ends = {0, len(systems) - 1}
+        systems = [system for index, system in enumerate(systems) if index not in ends or lines[index] == max(lines)]
     if not systems:
         return None
     darkness, tinted = darkness_map(crop, with_tinted=True)
@@ -128,14 +146,18 @@ class MeasureFinder:
     def __init__(
         self,
         ratios: tuple[float | None, float | None, float | None, float | None] = (None, None, None, None),
+        scale: float = 1.0,
+        page: bool = False,
     ) -> None:
         self.ratios = ratios
+        self.scale = scale
+        self.page = page
         self._order = [False, True]
         self.found = {False: 0, True: 0}
 
     def __call__(self, frame: Frame) -> FrameMeasures | None:
         for invert in self._order:
-            found = frame_measures(inverted(frame) if invert else frame, self.ratios)
+            found = frame_measures(inverted(frame) if invert else frame, self.ratios, self.scale, self.page)
             if found is not None and found.measures:
                 if invert != self._order[0]:
                     self._order.reverse()

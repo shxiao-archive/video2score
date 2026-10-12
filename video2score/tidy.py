@@ -93,6 +93,15 @@ def _snap_lines(ink: np.ndarray, geo: Geometry) -> Geometry:
     return Geometry(geo.spacing, groups, geo.left, geo.right)
 
 
+def _crossing_arc(ink: np.ndarray, labels: np.ndarray, index: int, box: np.ndarray, spacing: float) -> bool:
+    """跨过小节线的细弧：比一个线距宽、不到一个线距高、墨稀（一道细笔），而且是纯黑的（不是投票剩下的灰色插画）。"""
+    x, y, w, h, area = (int(value) for value in box)
+    if w < 1.0 * spacing or h > 1.0 * spacing or area > 0.35 * spacing * w:
+        return False
+    part = labels[y : y + h, x : x + w] == index
+    return float(ink[y : y + h, x : x + w][part].mean()) >= 0.8
+
+
 def _thickness(spacing: float) -> int:
     return max(1, int(round(spacing * 0.09)))
 
@@ -210,7 +219,10 @@ def _drop_residue(ink: np.ndarray, geo: Geometry) -> np.ndarray:
             continue
         outside = y1 < staff_top or y > staff_bottom
         # 谱表外、碰到画面边缘：从邻格截进来的残块、画面外伸进来的插画。
-        if outside and (x <= 0 or x + w >= width or y <= 0 or y1 >= height):
+        # 跨小节线的连线、滑音弧（从这一格的音一直画过小节线）也碰左右边：纯黑的细弧、伸进格里一个线距以上的留着。
+        if outside and (x <= 0 or x + w >= width or y <= 0 or y1 >= height) and not (
+            y > 0 and y1 < height and _crossing_arc(ink, labels, index, stats[index], spacing)
+        ):
             drop[index] = True
             continue
         # 大块的浅灰：没投掉的背景画。

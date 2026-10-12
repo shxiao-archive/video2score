@@ -298,6 +298,10 @@ def _drop_redundant(slots: list[Slot]) -> tuple[list[Slot], int]:
     drop: set[int] = set()
     if numbered:
         drop.update(_leading_surplus(slots, numbered[0]))
+        # 最后一个有号槽位后面的无号槽位：比它早出现很久的不会是结尾的小节（谱是按顺序露出来的），
+        # 是追踪收重、号又没读出来的一份（整页视图里行首小节的号印在谱号后面，常读不出），排序时落到了最后。
+        last = slots[numbered[-1]]
+        drop.update(index for index in range(numbered[-1] + 1, len(slots)) if slots[index].first_seconds + _LATE < last.first_seconds)
     for left, right in zip(numbered, numbered[1:]):
         run = list(range(left + 1, right))
         if not run:
@@ -383,7 +387,8 @@ def _fill_from_neighbours(
     """没定出号的槽位，按前后的号补：
 
     - 读数里恰好有一个落在前后两个号之间，就是它（平票时这样裁决：87 和 822，取 87）；
-    - 前后号正好差 2、中间只有它一个，读不出也只能是中间那个号。
+    - 前后号正好差 2、中间只有它一个，读不出也只能是中间那个号；
+    - 连着几个没号的格，前后号之间正好空出这么多个号（68、空、空、71）：依次补上。
     """
     filled = 0
     for index, slot in enumerate(slots):
@@ -405,6 +410,22 @@ def _fill_from_neighbours(
             slot.number = before + 1
             slot.number_score = 0.5
             filled += 1
+    index = 1
+    while index < len(slots):
+        if slots[index].number is not None:
+            index += 1
+            continue
+        end = index
+        while end < len(slots) and slots[end].number is None:
+            end += 1
+        before = slots[index - 1].number
+        after = slots[end].number if end < len(slots) else None
+        if before is not None and after is not None and after - before == end - index + 1:
+            for offset, slot in enumerate(slots[index:end], start=1):
+                slot.number = before + offset
+                slot.number_score = 0.5
+                filled += 1
+        index = end
     return filled
 
 
