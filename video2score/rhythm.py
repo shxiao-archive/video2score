@@ -386,8 +386,11 @@ def _hollow_heads_on_stems(
         # 符干接在符头中部：朝下的符干上端、朝上的符干下端，和符头中心差不多高（往符干里偏一点）。
         # 放大过的小谱面（thick）：符干末端能伸到符头中心再往里 0.4 个线距；环有两三个像素粗，按 0.1 个线距（一个多像素）
         # 一步挪可能正好错过最贴的位置，改按 0.05 挪。一般的谱不这样找：背景杂的视频里这样会多找出假的空心符头。
+        # 朝上的符干一般的谱也放到 0.3：符干和环右边那道竖笔连成一道时，量出的下端会伸过中心 0.3 个线距（挂在最下面那条线下的二分音符）。
+        # 朝下的不放宽：谱面下方背景插画的竖笔头上会凑出假环。
         inward, step = (0.4, 0.05) if thick else (0.2, 0.1)
-        for side, end, shifts in ((1, y0, np.arange(-0.3, inward + 0.01, step)), (-1, y1, np.arange(-inward, 0.31, step))):
+        below = max(inward, 0.3)
+        for side, end, shifts in ((1, y0, np.arange(-0.3, inward + 0.01, step)), (-1, y1, np.arange(-below, 0.31, step))):
             for dx in np.arange(0.4, 0.8, step):
                 for dy in shifts:
                     cx, cy = x + side * dx * spacing, end + dy * spacing

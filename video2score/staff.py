@@ -156,10 +156,13 @@ def find_systems(rgb: np.ndarray, cover: float = 0.40) -> list[System]:
     if not staves:
         return []
     ink = bar_ink(rgb, gray, staves)
-    bars = [
-        _line_coloured(rgb, gray, staff, _dark_bars(gray, staff, strong_bars(ink, staff.top, staff.bottom)))
-        for staff in staves
-    ]
+
+    def staff_bars(staff: Staff, cover: float) -> list[int]:
+        return _line_coloured(rgb, gray, staff, _dark_bars(gray, staff, strong_bars(ink, staff.top, staff.bottom, cover)))
+
+    bars = [staff_bars(staff, 0.85) for staff in staves]
+    # 配对那一组上已经有整根的线时，别的组上贯穿六成就够：画面角上固定的半透明台标会盖掉五线谱最上面一截小节线。
+    partial = [staff_bars(staff, 0.6) for staff in staves]
     width = gray.shape[1]
     systems: list[System] = []
     for members in _system_groups(staves, bars):
@@ -171,7 +174,7 @@ def find_systems(rgb: np.ndarray, cover: float = 0.40) -> list[System]:
         found = [
             x
             for x in bars[bar_index]
-            if all(any(abs(x - other) <= 5 for other in bars[index]) for index in members)
+            if all(any(abs(x - other) <= 5 for other in bars[index] + partial[index]) for index in members)
         ]
         if len(members) >= 2:
             # 虚线小节线（GP 的自由节拍段落）：五线谱和 TAB 上都在同一列才算，符干不会伸进 TAB。
@@ -462,14 +465,14 @@ def _system_groups(staves: list[Staff], bars: list[list[int]]) -> list[list[int]
     return groups
 
 
-def strong_bars(ink: np.ndarray, top: float, bottom: float) -> list[int]:
-    """几乎贯穿这一组谱线的细竖线。TAB 上这就是小节线，符干很少能铺满。"""
+def strong_bars(ink: np.ndarray, top: float, bottom: float, cover: float = 0.85) -> list[int]:
+    """几乎贯穿这一组谱线（占谱高 cover 以上）的细竖线。TAB 上这就是小节线，符干很少能铺满。"""
     y0 = int(round(top))
     y1 = int(round(bottom))
     if y1 - y0 < 8 or ink.shape[1] < 8:
         return []
     fraction = ink[y0 : y1 + 1].mean(axis=0) / 255.0
-    columns = [index for index, value in enumerate(fraction) if value >= 0.85]
+    columns = [index for index, value in enumerate(fraction) if value >= cover]
     if not columns:
         return []
     groups: list[list[int]] = [[columns[0]]]
