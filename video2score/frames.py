@@ -8,7 +8,6 @@ from typing import Iterator
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from video2score.staff import legacy_systems
 
@@ -107,14 +106,6 @@ def page_box(rgb: np.ndarray) -> tuple[int, int, int, int] | None:
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     systems = legacy_systems(gray)
     return _white_page_box(gray, systems, chrome=False) if systems else None
-
-
-def crop_score_page(image: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
-    """按等距谱线裁出谱带。谱带若落在深色界面里的白纸上，则裁整页。"""
-    box = score_box(np.array(image.convert("RGB")))
-    if box is None:
-        raise RuntimeError("没有找到谱面。")
-    return image.crop(box), box
 
 
 def _best_cluster(

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
+import os
 
-from video2score.fetch import COOKIE_PATH
+from video2score.fetch import _UA, COOKIE_PATH
 
 _GENERATE = (
     "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
@@ -16,14 +15,6 @@ _POLL = (
     "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
     "?qrcode_key={key}&source=main_web&web_location=333.1228"
 )
-
-
-def generate_login_qr(dest: Path) -> str:
-    """把登录二维码写成 PNG，返回 qrcode_key。"""
-    png, key = login_qr()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(png)
-    return key
 
 
 def login_qr() -> tuple[bytes, str]:
@@ -42,24 +33,6 @@ def login_qr() -> tuple[bytes, str]:
     buffer = io.BytesIO()
     qrcode.make(data["url"]).save(buffer)
     return buffer.getvalue(), str(data["qrcode_key"])
-
-
-def poll_login(qrcode_key: str, timeout: float = 180.0) -> None:
-    """等到手机确认后把 Cookie 写入 COOKIE_PATH。"""
-    deadline = time.time() + timeout
-    seen = ""
-    while time.time() < deadline:
-        status = poll_once(qrcode_key)
-        if status == LOGGED_IN:
-            return
-        if status == EXPIRED:
-            raise RuntimeError("二维码已失效，请重新获取。")
-        message = "已扫码，等待手机确认" if status == SCANNED else "等待扫码"
-        if message != seen:
-            print(message, flush=True)
-            seen = message
-        time.sleep(1.5)
-    raise TimeoutError("登录超时，请重新获取二维码。")
 
 
 # poll_once 的结果。
@@ -81,6 +54,7 @@ def poll_once(qrcode_key: str) -> str:
             raise RuntimeError("登录成功但没有 SESSDATA，请重新扫码。")
         COOKIE_PATH.parent.mkdir(parents=True, exist_ok=True)
         COOKIE_PATH.write_text(cookie + "\n", encoding="utf-8")
+        os.chmod(COOKIE_PATH, 0o600)  # 登录信息只给本人读（mac 上默认别的用户也能读）
         return LOGGED_IN
     if code == 86038:
         return EXPIRED
@@ -97,13 +71,7 @@ def logout() -> None:
 
 
 def _passport_headers() -> dict[str, str]:
-    return {
-        "Referer": "https://www.bilibili.com/",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-    }
+    return {"Referer": "https://www.bilibili.com/", "User-Agent": _UA}
 
 
 def _set_cookie_pairs(response: object) -> str:

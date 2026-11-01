@@ -171,11 +171,25 @@ def find_systems(rgb: np.ndarray, cover: float = 0.40) -> list[System]:
         bar_index = tab[0] if tab else members[0]
         # 五线谱和 TAB 之间的空当里，小节线可以断开。每组谱线上都有线才算。
         # 只穿过五线谱的符干、只穿过 TAB 的符干都不算。
-        found = [
-            x
-            for x in bars[bar_index]
-            if all(any(abs(x - other) <= 5 for other in bars[index] + partial[index]) for index in members)
-        ]
+        # 候选不只看 TAB：水印盖掉 TAB 顶上一两格时 TAB 上没有整根的线，这时靠别的组上整根的线，TAB 上贯穿六成就够。
+        def crosses_all(x: int, lines: list[list[int]]) -> bool:
+            return all(any(abs(x - other) <= 5 for other in lines[index]) for index in members)
+
+        loose = [full + part for full, part in zip(bars, partial)]
+        found = [x for x in bars[bar_index] if crosses_all(x, loose)]
+        if len(members) >= 2:
+            # 水印盖掉 TAB 顶上一两格：别的组上整根都在，TAB 上下面六成连着。谱渐隐成实拍画面时，线是东断一截西断一截，不算。
+            base = staves[bar_index]
+            lower = strong_bars(ink, base.bottom - 0.6 * (base.bottom - base.top), base.bottom, 0.95)
+            others = [index for index in members if index != bar_index]
+            found += [
+                x
+                for x in partial[bar_index]
+                if all(abs(x - other) > 5 for other in found)
+                and any(abs(x - other) <= 5 for other in lower)
+                and all(any(abs(x - other) <= 5 for other in bars[index]) for index in others)
+            ]
+            found.sort()
         if len(members) >= 2:
             # 虚线小节线（GP 的自由节拍段落）：五线谱和 TAB 上都在同一列才算，符干不会伸进 TAB。
             # 播放光标是一道彩色细竖线，压在背景上看着也是断断续续的：和实线小节线一样按色调筛掉。
@@ -495,25 +509,6 @@ def strong_bars(ink: np.ndarray, top: float, bottom: float, cover: float = 0.85)
             continue
         merged.append(center)
     return merged
-
-
-def without_staff_lines(mask: np.ndarray) -> np.ndarray:
-    """抽掉细长的谱线，避免贴着谱线的数字和整行谱粘成一块。"""
-    _height, width = mask.shape
-    if width < 48:
-        return mask
-    kernel = max(28, width // 8)
-    lines = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, 1)),
-    )
-    thick = cv2.morphologyEx(
-        lines,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, 5)),
-    )
-    return cv2.subtract(mask, cv2.subtract(lines, thick))
 
 
 def legacy_systems(gray: np.ndarray) -> list[tuple[float, float, float, int]]:

@@ -383,14 +383,13 @@ def is_multirest(measure: Measure) -> bool:
 def _fill_from_neighbours(
     slots: list[Slot],
     readings: dict[int, list[Reading | None]],
-) -> int:
+) -> None:
     """没定出号的槽位，按前后的号补：
 
     - 读数里恰好有一个落在前后两个号之间，就是它（平票时这样裁决：87 和 822，取 87）；
     - 前后号正好差 2、中间只有它一个，读不出也只能是中间那个号；
     - 连着几个没号的格，前后号之间正好空出这么多个号（68、空、空、71）：依次补上。
     """
-    filled = 0
     for index, slot in enumerate(slots):
         if slot.number is not None or index == 0 or index + 1 >= len(slots):
             continue
@@ -405,11 +404,9 @@ def _fill_from_neighbours(
         if len(candidates) == 1:
             slot.number = candidates.pop()
             slot.number_score = 0.6
-            filled += 1
         elif not candidates and after - before == 2:
             slot.number = before + 1
             slot.number_score = 0.5
-            filled += 1
     index = 1
     while index < len(slots):
         if slots[index].number is not None:
@@ -424,9 +421,7 @@ def _fill_from_neighbours(
             for offset, slot in enumerate(slots[index:end], start=1):
                 slot.number = before + offset
                 slot.number_score = 0.5
-                filled += 1
         index = end
-    return filled
 
 
 def _merge(slots: list[Slot]) -> tuple[list[Slot], int, int]:

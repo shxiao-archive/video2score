@@ -14,6 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from video2score.images import read_gray
 from video2score.tidy import geometry
 
 # 笔画在干净图里覆盖不到这么多，算丢了。
@@ -36,9 +37,9 @@ class InkReport:
 def check_job(job_dir: Path) -> InkReport:
     report = InkReport()
     for record in json.loads((job_dir / "measures.json").read_text(encoding="utf-8")):
-        clean = cv2.imread(str(job_dir / record["image"]), cv2.IMREAD_GRAYSCALE)
+        clean = read_gray(job_dir / record["image"])
         paths = [record.get("raw")] + list(record.get("raws") or [])
-        frames = [cv2.imread(str(job_dir / path), cv2.IMREAD_GRAYSCALE) for path in paths if path]
+        frames = [read_gray(job_dir / path) for path in paths if path]
         frames = [frame for frame in frames if frame is not None and clean is not None and frame.shape == clean.shape]
         if clean is None or not frames:
             continue

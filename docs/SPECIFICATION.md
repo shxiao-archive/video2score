@@ -101,9 +101,9 @@ jobs/<id>/
 │   └── prefix.png             # 乐谱行首前缀（谱号、调弦字母）
 ├── score.pdf                  # 截图清洗重排 PDF
 ├── score.musicxml             # 识别出的乐谱（五线谱 + TAB）
-├── score.gp / .gpx / .gp5     # 导出的 Guitar Pro 文件
+├── score.gp / .gpx / .gp5     # 导出的 Guitar Pro 文件（再次导出时旧文件改名留着：score.<修改时间>.gp）
 ├── score_engraved.pdf         # 重新排版印刷的高清 PDF
-└── tab_issues.json / .txt     # 需人工核对的可疑小节明细（界面用 json，txt 给人看）
+└── tab_issues.json / .txt     # 需人工核对的可疑小节明细（界面用 json，txt 给人看）；最前面是整首的提醒（估的速度、缺的小节），json 里这几项 number、image 为 null
 ```
 
 ### 3.2 作业元数据契约 (`manifest.json`)
@@ -111,8 +111,10 @@ jobs/<id>/
 ```typescript
 interface JobManifest {
   version: 2;                          // 固定为 2
-  status: "captured" | "omr_done" | "failed";
-  error?: string;                      // 失败时的报错信息
+  status: "running" | "captured" | "omr_done" | "failed";  // running：一开始就写下，跑完才改；进程被杀就停在这里，界面显示"没跑完"
+  pid?: number;                        // running 时的进程号；界面不列本进程正在跑的作业
+  error?: string;                      // 失败时的报错；或截图谱已有、读 TAB 没完成（此时 status 是 captured）
+  export_error?: string;               // 导出没完成（作业不算失败，下次导出成功时清掉）
   notation?: "staff" | "tab" | "staff+tab";
   source: {
     type: "local" | "bilibili" | "url";
@@ -208,6 +210,7 @@ interface MeasureRecord {
 | **密集加线干扰** | 低音区密集十六分音符下方的短加线被误当成第 6 根谱线。 | 加线比正常谱线稀疏、单段极短。存疑的 6 线组降低优先级，优先使用偏移一线的 5 线组。 |
 | **五弦 TAB 与五线谱** | 一行里上下两组都是 5 条线。 | 下面一组线距更大（>15%）时判为 TAB；只有一组 5 条线的纯五弦 TAB 用 `--notation tab` 手动指定。 |
 | **水印盖住小节线** | 画面角上固定的半透明白色水印盖掉五线谱最上面一截，落在水印底下的小节线在五线谱上只剩七八成高。 | 配对那一组（TAB）上有整根的线时，五线谱上贯穿六成就算；否则两个小节并成一格，或者整小节丢掉。盖在 TAB 顶上时，五线谱上要有整根，TAB 上要贯穿六成且下面六成连着才收（谱渐隐成实拍画面时线东断西断，不能放宽）；否则整行都因小节线不够数而丢掉。 |
+| **视频里跳过的小节** | 小节号断了档，谱里少了小节（画面一闪而过、被水印挡住）。 | 不猜内容：列进 `tab_issues` 最前面，提醒对照视频补。合并休止占的号、整小节休止后面的断档不算；后面的号比它小（读错，如 511）不算；已经是最后一个号时，只信 16 小节以内的间隔。 |
 | **虚线小节线** | 小节线垂直断续，只出现在谱线行之间（GP 自由节拍）。 | 竖线墨迹占比合适、五线谱与 TAB 同列对齐、色调与谱线一致时才收。 |
 | **翻页翻到一段长得一样的反复** | 谱面很小（线距七八个像素）时小节号读不准，翻页后的新一行和旧一行音符完全相同，会被当成往上挪了一行。 | 挪动了的位移里，两边都读出号的配对中号不一样的有两对以上、还比一样的多，就不采信（一个号是另一个号的尾巴，如 46 与 146，算一样）；画面没动时不用这条。 |
 | **整页视图翻页时露出两张纸** | 上一页的末尾和下一页的开头同时在画面里，下一页碰到画面下沿。 | 整页模式下两张纸一起框；中间的灰缝在小节上下沿检测处挡掉。被画面边沿切掉一截的行（只露出五线谱或只露出 TAB）这一帧不收。 |
@@ -278,6 +281,7 @@ interface MeasureRecord {
 - **`.gp` (GP7/8)**：写入 ZIP 容器的 `Content/score.gpif`；弦号以低音粗弦为 0；推弦每半音 50 单位。
 - **`.gpx` (GP6)**：将 `score.gpif` 写入模拟的 BCFS 块设备文件系统，封装为 BCFZ 数据包。
 - **`.gp5` (GP5)**：通过 `pyguitarpro` 写入；文字统一转为 GBK 编码。
+- **保留旧文件**：`.gp`、`.gpx`、`.gp5` 已存在时先改名成 `score.<修改时间>.gp`（用户可能在 Guitar Pro 里改过），再写新的。重新生成 `score_engraved.pdf` 时先打印到临时文件，成功才换掉旧的。
 - **`score_engraved.pdf`**：通过 Node.js 调用 `alphaTab` 渲染出分块 SVG，按 A4 分页拼成网页，再由 Node 里的 Puppeteer 控制自带的 chrome-headless-shell（固定版本）用 `page.pdf()` 打印为矢量 PDF。从源码运行时没有自带浏览器，用 `python packaging/build.py --browser` 下载同一版本，或用本机 Chrome。
 
 ---
@@ -288,7 +292,11 @@ interface MeasureRecord {
 - **临时凭证校验**：每次启动生成高强度随机 Token，所有前端 API 请求必须带 Token。
 - **防 DNS 重绑定**：后端严格检查 HTTP `Host` 请求头，非 `localhost` 或 `127.0.0.1` 请求直接返回 403。
 - **路径穿越防御**：所有作业文件访问必须限制在 `jobs/` 目录树内，禁止 `../` 越界。
-- **文件软删除**：Web 端删除乐谱操作仅将文件夹移动到 `data/trash/`，不执行物理永久删除。
+- **文件软删除**：Web 端删除乐谱操作仅将文件夹移动到 `data/trash/`（拖进来的视频只有这首用时，一起移到作业的 `upload/` 里；有任务在跑时视频先留着）。只有点“清空回收站”（`POST /api/trash/empty`）才真删。
+- **上传**：先写 `.part` 临时文件，收全才换名；同一个文件再拖一次直接用旧的，同名但内容不同的加序号。
+- **取消**：下载、取帧、清洗、读 TAB 都会经过进度回调，点取消时在回调里抛 `Cancelled`（继承 `BaseException`，路上重试和记错的 `except Exception` 吞不掉），作业目录直接删掉。
+- **manifest 写入**：先写 `manifest.json.tmp` 再换名，写到一半崩溃时旧文件还在。
+- **B 站多 P**：按链接里的 `?p=N` 取那一 P 的视频和分 P 名；超出范围直接报错。
 
 ---
 

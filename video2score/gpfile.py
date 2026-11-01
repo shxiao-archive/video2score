@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import html
 import struct
+import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -583,6 +585,20 @@ def _gp5_key(gp, fifths: int):
 WRITERS = {"gp": write_gp, "gpx": write_gpx, "gp5": write_gp5}
 
 
+def _keep_old(target: Path) -> None:
+    """用户可能在 Guitar Pro 里改过这个文件：改名留着（score.20261101-120000.gp），不覆盖。"""
+    if not target.exists():
+        return
+    stamp = datetime.fromtimestamp(target.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
+    backup = target.with_name(f"{target.stem}.{stamp}{target.suffix}")
+    index = 1
+    while backup.exists():
+        backup = target.with_name(f"{target.stem}.{stamp}-{index}{target.suffix}")
+        index += 1
+    target.replace(backup)
+    print(f"原来的 {target.name} 改名留着：{backup.name}", file=sys.stderr)
+
+
 def export(musicxml: Path, formats: list[str], out_dir: Path | None = None, stem: str | None = None, title: str | None = None) -> list[Path]:
     """把一份 MusicXML 转成要的几种 Guitar Pro 格式，和它放在一起（或 out_dir 里），返回写出的文件。"""
     wanted = [item for item in formats if item in WRITERS]
@@ -594,6 +610,7 @@ def export(musicxml: Path, formats: list[str], out_dir: Path | None = None, stem
     written = []
     for kind in wanted:
         target = folder / f"{name}.{kind}"
+        _keep_old(target)
         WRITERS[kind](target, score)
         written.append(target)
     return written

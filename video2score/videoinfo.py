@@ -16,7 +16,7 @@ import urllib.parse
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from video2score.fetch import _api_headers, bvid_from_source
+from video2score.fetch import _api_headers, bvid_from_source, part_from_source
 
 _VIEW = "https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
 _WBI_VIEW = "https://api.bilibili.com/x/web-interface/wbi/view?{query}"
@@ -73,14 +73,18 @@ def bilibili_info(source: str) -> VideoInfo:
         view = _data(session.get(_WBI_VIEW.format(query=_wbi_sign(session, headers, {"bvid": bvid})), headers=headers, timeout=20), "视频信息")
     except Exception:
         view = _data(session.get(_VIEW.format(bvid=bvid), headers=headers, timeout=20), "视频信息")
+    # 多 P 视频：大标题常是合集名，这一 P 的名字才是曲名；背景音乐也按这一 P 查。
+    part = part_from_source(source)
+    pages = view.get("pages") or []
+    page = pages[part - 1] if part <= len(pages) else {}
     info = VideoInfo(
-        link=f"https://www.bilibili.com/video/{bvid}/",
-        title=str(view.get("title") or ""),
+        link=f"https://www.bilibili.com/video/{bvid}/" + (f"?p={part}" if part > 1 else ""),
+        title=str((len(pages) > 1 and page.get("part")) or view.get("title") or ""),
         author=str((view.get("owner") or {}).get("name") or ""),
     )
     # 曲名、原唱查不到不要紧（下面从标题里取），视频作者和链接有了就行。
     try:
-        player = _data(session.get(_PLAYER.format(bvid=bvid, cid=view.get("cid")), headers=headers, timeout=20), "播放器信息")
+        player = _data(session.get(_PLAYER.format(bvid=bvid, cid=page.get("cid") or view.get("cid")), headers=headers, timeout=20), "播放器信息")
         bgm = player.get("bgm_info") or {}
         if bgm.get("music_id"):
             detail = _data(session.get(_BGM.format(music_id=bgm["music_id"]), headers=headers, timeout=20), "背景音乐")

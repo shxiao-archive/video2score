@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from video2score.paths import COOKIE_PATH
 
 _BVID_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+_PART_RE = re.compile(r"[?&]p=(\d+)")
 _PAGELIST = "https://api.bilibili.com/x/player/pagelist?bvid={bvid}"
 _PLAYURL = (
     "https://api.bilibili.com/x/player/playurl"
@@ -35,7 +36,26 @@ def bvid_from_source(source: str) -> str:
     return match.group(0)
 
 
-def download_bilibili(source: str, dest: Path) -> Path:
+def part_from_source(source: str) -> int:
+    """链接选的第几 P（?p=3），没写就是第 1 P。"""
+    match = _PART_RE.search(source or "")
+    return max(1, int(match.group(1))) if match else 1
+
+
+def percent_steps(progress: Callable[[str], None] | None) -> Callable[[int, int], None]:
+    """下载进度：每 5% 报一次，免得命令行刷屏。取消也靠这个回调打断。"""
+    last = [-5]
+
+    def report(done: int, total: int) -> None:
+        percent = int(100 * done / total)
+        if progress is not None and (percent >= last[0] + 5 or (percent == 100 and last[0] != 100)):
+            last[0] = percent
+            progress(f"取视频…… {percent}%")
+
+    return report
+
+
+def download_bilibili(source: str, dest: Path, progress: Callable[[str], None] | None = None) -> Path:
     """下载视频到 dest，返回写入的路径。文件必须非空。"""
     from curl_cffi import requests
 
@@ -46,9 +66,12 @@ def download_bilibili(source: str, dest: Path) -> Path:
     page = session.get(_PAGELIST.format(bvid=bvid), headers=headers, timeout=20)
     payload = _json_body(page, "pagelist")
     rows = payload.get("data") or []
-    if payload.get("code") not in (0, None) or not rows or not rows[0].get("cid"):
+    part = part_from_source(source)
+    if rows and part > len(rows):
+        raise RuntimeError(f"这个视频只有 {len(rows)} 个分 P，没有第 {part} P。")
+    if payload.get("code") not in (0, None) or not rows or not rows[part - 1].get("cid"):
         raise RuntimeError(f"分 P 列表没有 cid：{payload.get('message') or payload}")
-    cid = int(rows[0]["cid"])
+    cid = int(rows[part - 1]["cid"])
     cdn_headers = {"Referer": headers["Referer"], "User-Agent": headers["User-Agent"]}
     dash = _select_dash(session, bvid, cid, headers)
     if dash is not None:
@@ -62,7 +85,7 @@ def download_bilibili(source: str, dest: Path) -> Path:
     last_error: Exception | None = None
     for _attempt in range(3):
         try:
-            _download_ranges(session, media_url, cdn_headers, dest, expected)
+            _download_ranges(session, media_url, cdn_headers, dest, expected, progress)
             dest.with_suffix(".qn").write_text(str(got_qn), encoding="utf-8")
             return dest
         except Exception as exc:
@@ -78,6 +101,7 @@ def _download_ranges(
     headers: dict[str, str],
     dest: Path,
     expected: int,
+    progress: Callable[[str], None] | None = None,
 ) -> None:
     """按区间下载。整文件 HTTP/2 流在这几个 CDN 上会挂起或被重置。"""
     from curl_cffi.const import CurlHttpVersion
@@ -86,6 +110,7 @@ def _download_ranges(
         raise RuntimeError(f"playurl 没有给出文件大小：{expected}")
     partial = dest.with_suffix(dest.suffix + ".part")
     chunk = 2 * 1024 * 1024
+    report = percent_steps(progress)
     start = partial.stat().st_size if partial.exists() else 0
     if start > expected or start % chunk != 0:
         partial.unlink(missing_ok=True)
@@ -93,6 +118,7 @@ def _download_ranges(
     try:
         with partial.open("ab" if start else "wb") as handle:
             while start < expected:
+                report(start, expected)
                 end = min(start + chunk, expected) - 1
                 data = _read_range(session, url, headers, start, end, CurlHttpVersion.V1_1)
                 if start == 0 and not _is_media(data):
@@ -100,7 +126,8 @@ def _download_ranges(
                     raise RuntimeError(
                         f"playurl 媒体不是视频：{' '.join(snippet.split())}"
                     )
-                if len(data) != end - start + 1:
+                # 服务器不理 Range 时，第一段回 200 和整个文件，也是对的。
+                if len(data) != end - start + 1 and not (start == 0 and len(data) == expected):
                     raise RuntimeError(
                         f"区间 {start}-{end} 长度不符：{len(data)}"
                     )

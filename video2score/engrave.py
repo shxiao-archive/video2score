@@ -119,6 +119,14 @@ def _scratch(folder: Path) -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory(dir=folder, prefix="tmp-", ignore_cleanup_errors=True)
 
 
+def _run_node(command: list[str], failure: str) -> None:
+    """跑 Node 脚本；失败时把它的输出末尾放进错误，不然只看得到"退出码 1"。"""
+    result = subprocess.run(command, cwd=RENDERER, capture_output=True, timeout=300)
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).decode("utf-8", errors="replace").strip().splitlines()[-15:]
+        raise RuntimeError(failure + ("\n" + "\n".join(output) if output else ""))
+
+
 def render_chunks(gp_file: Path, width: int = RENDER_WIDTH, bars_per_row: int = BARS_PER_ROW) -> dict:
     """调 alphaTab 排版：{width, height, chunks: [{y, height, svg}]}，按从上到下排好。"""
     runner = node()
@@ -131,13 +139,7 @@ def render_chunks(gp_file: Path, width: int = RENDER_WIDTH, bars_per_row: int = 
         out = Path(folder) / "chunks.json"
         widths = Path(folder) / "fonts.json"
         widths.write_text(json.dumps(frozen_font_widths()), encoding="utf-8")
-        subprocess.run(
-            [runner, str(RENDERER / "render.mjs"), str(gp_file), str(out), str(width), str(bars_per_row), str(widths)],
-            check=True,
-            timeout=300,
-            cwd=RENDERER,
-            capture_output=True,
-        )
+        _run_node([runner, str(RENDERER / "render.mjs"), str(gp_file), str(out), str(width), str(bars_per_row), str(widths)], "alphaTab 排版失败。")
         return json.loads(out.read_text(encoding="utf-8"))
 
 
@@ -234,19 +236,15 @@ def gp_to_pdf(gp_file: Path, pdf: Path, browser: str | None = None) -> Path:
     rendered = render_chunks(gp_file)
     document = page_html(rendered["chunks"], int(rendered["width"]) or RENDER_WIDTH, str(rendered.get("copyright") or ""))
     pdf = pdf.resolve()
-    pdf.unlink(missing_ok=True)
     with _scratch(pdf.parent) as folder:
         page = Path(folder) / "score.html"
         page.write_text(document, encoding="utf-8")
-        result = subprocess.run(
-            [runner, str(RENDERER / "print.mjs"), str(page), str(pdf), browser, str(Path(folder) / "profile")],
-            cwd=RENDERER,
-            capture_output=True,
-            timeout=300,
-        )
-        if result.returncode != 0 or not pdf.is_file():
-            output = (result.stdout + result.stderr).decode("utf-8", errors="replace").strip().splitlines()[-15:]
-            raise RuntimeError("浏览器打印 PDF 失败。" + ("\n" + "\n".join(output) if output else ""))
+        # 先打印到临时文件（同一个文件夹），成功了才换掉旧 PDF。
+        printed = Path(folder) / "score.pdf"
+        _run_node([runner, str(RENDERER / "print.mjs"), str(page), str(printed), browser, str(Path(folder) / "profile")], "浏览器打印 PDF 失败。")
+        if not printed.is_file():
+            raise RuntimeError("浏览器打印 PDF 失败：没有生成文件。")
+        os.replace(printed, pdf)
     return pdf
 
 

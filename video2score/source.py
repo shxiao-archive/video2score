@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any, Callable
 
-_BVID_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+from video2score.fetch import _BVID_RE, download_bilibili, percent_steps
 
 
 def classify_source(source: str) -> tuple[str, str]:
@@ -20,7 +19,8 @@ def classify_source(source: str) -> tuple[str, str]:
             raise ValueError(f"不是文件：{path}")
         return "local", str(path.resolve())
     lowered = text.lower()
-    if _BVID_RE.fullmatch(text) or "bilibili.com" in lowered or "b23.tv" in lowered:
+    # B 站上不是普通视频的页面（番剧、直播）没有 BV 号，走不了 fetch.py，交给 yt-dlp。
+    if _BVID_RE.fullmatch(text) or "b23.tv" in lowered or ("bilibili.com" in lowered and _BVID_RE.search(text)):
         return "bilibili", text
     if lowered.startswith(("http://", "https://")):
         return "url", text
@@ -32,9 +32,7 @@ def fetch_video(source: str, kind: str, download_dir: Path, progress: Callable[[
     if kind == "local":
         return Path(source.strip().strip('"')).resolve()
     if kind == "bilibili":
-        from video2score.fetch import download_bilibili
-
-        return download_bilibili(_expand_short_link(source.strip()), download_dir / "video.mp4")
+        return download_bilibili(_expand_short_link(source.strip()), download_dir / "video.mp4", progress)
     return _download_with_ytdlp(source.strip(), download_dir, progress)
 
 
@@ -85,17 +83,12 @@ def _download_with_ytdlp(url: str, download_dir: Path, progress: Callable[[str],
         "outtmpl": str(download_dir / "video.%(ext)s"),
     }
     if progress is not None:
-        last = [-1]
+        report = percent_steps(progress)
 
         def hook(status: dict[str, Any]) -> None:
             total = status.get("total_bytes") or status.get("total_bytes_estimate")
-            if status.get("status") != "downloading" or not total:
-                return
-            percent = int(100 * (status.get("downloaded_bytes") or 0) / total)
-            # 每 5% 报一次，免得命令行刷屏。
-            if percent >= last[0] + 5 or (percent == 100 and last[0] != 100):
-                last[0] = percent
-                progress(f"取视频…… {percent}%")
+            if status.get("status") == "downloading" and total:
+                report(status.get("downloaded_bytes") or 0, total)
 
         options["progress_hooks"] = [hook]
     with yt_dlp.YoutubeDL(options) as downloader:

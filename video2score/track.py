@@ -341,7 +341,6 @@ def _match_motion(
         # 谱是往左、往上走的。往回走的位移只在没有别的解释时才用。
         # 然后对上的越多越好，小节号冲突的越少越好（音符一样的相邻小节靠它分开）；
         # 再一样时位移越小越好（取帧够密时，真位移不到半个小节）。
-        forward = dx <= tol_x and dy <= tol_y
         rank = (forward, support - conflicts, -conflicts, -(abs(dx) + abs(dy)))
         if best is None or rank > best[0]:
             best = (rank, (dx, dy))

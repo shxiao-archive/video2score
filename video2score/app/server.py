@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import filecmp
 import json
 import logging
 import mimetypes
@@ -29,11 +30,11 @@ from urllib.parse import parse_qs, quote, urlsplit
 from video2score import __version__, paths
 from video2score.app import library
 from video2score.app.worker import Task, Worker
+from video2score.jobs import EXPORT_FORMATS, check_formats
 
 log = logging.getLogger("video2score")
 
 PREFERRED_PORT = 17865
-EXPORTS = ("gp", "gpx", "gp5", "pdf")
 _UPLOAD_CHUNK = 1 << 20
 
 
@@ -108,10 +109,8 @@ class App:
         return self.worker.submit(task)
 
     def _exports(self, exports: list[str]) -> list[str]:
-        unknown = [item for item in exports if item not in EXPORTS]
-        if unknown:
-            raise ValueError(f"不支持的导出格式：{', '.join(unknown)}")
-        return [item for item in EXPORTS if item in exports]
+        check_formats(exports)
+        return [item for item in EXPORT_FORMATS if item in exports]
 
     @staticmethod
     def _export(task: Task, job: Path, wanted: list[str], strict: bool = False) -> None:
@@ -122,39 +121,46 @@ class App:
         if not wanted:
             return
         if not (job / "score.musicxml").is_file():
-            task.error = "这首只认出了五线谱（没有 TAB），还不能导出 MusicXML 和 Guitar Pro 文件。"
+            task.error = manifest.get("error") or "这首只认出了五线谱（没有 TAB），还不能导出 MusicXML 和 Guitar Pro 文件。"
             return
         task.say("导出 " + "、".join(wanted) + "……")
         try:
             export_score(job, manifest, wanted)
         except Exception as exc:
+            manifest["export_error"] = f"导出没完成：{exc}"
             if strict:
                 raise
-            task.error = f"导出没完成：{exc}"
+            task.error = manifest["export_error"]
         finally:
             save_manifest(job, manifest)
 
     def upload(self, name: str, size: int, stream) -> Path:
-        """拖进来的视频存到 uploads/（同名的加序号），按本地视频转谱。"""
+        """拖进来的视频存到 uploads/，按本地视频转谱。同一个文件再拖一次直接用旧的；同名但内容不同的加序号。"""
         name = re.sub(r'[\\/:*?"<>|\r\n]+', "_", Path(name).name).strip() or "video.mp4"
         paths.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        target = paths.UPLOADS_DIR / name
-        stem, suffix, index = target.stem, target.suffix, 1
-        while target.exists():
-            target = paths.UPLOADS_DIR / f"{stem}-{index}{suffix}"
-            index += 1
-        left = size
-        with target.open("wb") as handle:
-            while left > 0:
-                chunk = stream.read(min(_UPLOAD_CHUNK, left))
-                if not chunk:
-                    break
-                handle.write(chunk)
-                left -= len(chunk)
-        if left:
-            target.unlink(missing_ok=True)
-            raise ValueError("上传没有完成，请重试。")
-        return target
+        part = paths.UPLOADS_DIR / f"{secrets.token_hex(8)}.part"
+        try:
+            left = size
+            with part.open("wb") as handle:
+                while left > 0:
+                    chunk = stream.read(min(_UPLOAD_CHUNK, left))
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    left -= len(chunk)
+            if left:
+                raise ValueError("上传没有完成，请重试。")
+            target = paths.UPLOADS_DIR / name
+            stem, suffix, index = target.stem, target.suffix, 1
+            while target.exists():
+                if target.stat().st_size == size and filecmp.cmp(part, target, shallow=False):
+                    return target
+                target = paths.UPLOADS_DIR / f"{stem}-{index}{suffix}"
+                index += 1
+            part.replace(target)
+            return target
+        finally:
+            part.unlink(missing_ok=True)
 
 
 def _manifest(job: Path) -> dict[str, Any]:
@@ -274,9 +280,15 @@ class Handler(BaseHTTPRequestHandler):
         if action == "remove":
             if any(task["job"] == job_id and task["state"] in ("queued", "running") for task in self.app.worker.tasks()):
                 raise ValueError("这首还在导出，等它做完再删。")
-            target = library.remove(job_id)
+            # 排队的任务可能正要用这个视频：有任务时视频先留着，只移作业。
+            target = library.remove(job_id, move_upload=not self.app.worker.busy())
             return self._json({"ok": True, "trash": str(target)})
         self._error(HTTPStatus.NOT_FOUND, "没有这个接口。")
+
+    def _post_trash(self, parts: list[str]) -> None:
+        if parts != ["empty"]:
+            return self._error(HTTPStatus.NOT_FOUND, "没有这个接口。")
+        self._json({"freed": library.empty_trash()})
 
     def _post_tasks(self, parts: list[str]) -> None:
         if len(parts) == 2 and parts[1] == "cancel":
@@ -364,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="video2score", description="视频转谱：本机网页界面")
     parser.add_argument("--port", type=int, default=None, help=f"端口，默认 {PREFERRED_PORT}（被占用时随便找一个空的）")
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
-    parser.add_argument("--selftest", action="store_true", help="自检：起服务、调接口、导出一份小谱，然后退出")
+    parser.add_argument("--selftest", action="store_true", help="自检：起服务、调接口、转一段合成视频、导出一份小谱，然后退出")
     # macOS 从访达打开 .app 时可能带上系统自己的参数（-psn_…），不认识的忽略。
     args, _unknown = parser.parse_known_args(argv)
     setup_logging()

@@ -647,63 +647,6 @@ def _merge_chords(events: list[Event], spacing: float) -> list[Event]:
     return merged
 
 
-def _blob(ink: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> tuple[float, float, float] | None:
-    """一块区域里的墨：(墨的比例, 中心 x, 中心 y)。"""
-    x0, x1 = max(0, x0), min(ink.shape[1], x1)
-    y0, y1 = max(0, y0), min(ink.shape[0], y1)
-    if x1 <= x0 or y1 <= y0:
-        return None
-    patch = ink[y0:y1, x0:x1]
-    if not patch.any():
-        return None
-    ys, xs = np.nonzero(patch)
-    return float(patch.mean()), float(xs.mean() + x0), float(ys.mean() + y0)
-
-
-def _note_event(
-    ink: np.ndarray,
-    original: np.ndarray,
-    x: int,
-    y0: int,
-    y1: int,
-    lines: list[float],
-    spacing: float,
-    used: np.ndarray,
-) -> Event | None:
-    """一根符干：找符头、数符杠、看附点。"""
-    head_w = int(round(1.2 * spacing))
-    head_h = int(round(0.9 * spacing))
-    # 符头在符干的哪一端：符干朝上时符头在左下，朝下时在右上。
-    candidates = [
-        ("down_end", _blob(ink, x - head_w, x + 1, y1 - head_h, y1 + head_h // 2)),
-        ("up_end", _blob(ink, x, x + head_w + 1, y0 - head_h // 2, y0 + head_h)),
-    ]
-    best = max(candidates, key=lambda item: -1 if item[1] is None else item[1][0])
-    if best[1] is None or best[1][0] < 0.2:
-        return None
-    fill, head_x, head_y = best[1]
-    stem_up = best[0] == "down_end"
-    free_end = y0 if stem_up else y1
-    # 空心符头：符头框中心附近是白的。
-    hollow = _hollow(ink, head_x, head_y, spacing)
-    beams = _count_beams(original, x, free_end, stem_up, spacing)
-    dots = _dots(ink, head_x, head_y, spacing)
-    used[max(0, y0 - head_h) : y1 + head_h, max(0, x - head_w) : x + head_w + 1] = True
-    if hollow:
-        base = Fraction(1, 2)
-    else:
-        base = BASE.get(min(beams, 3), Fraction(1, 4))
-    duration = base * (Fraction(3, 2) if dots == 1 else Fraction(7, 4) if dots >= 2 else 1)
-    return Event(x=head_x, duration=duration, dots=dots, beams=beams, head_y=head_y, hollow=hollow)
-
-
-def _hollow(ink: np.ndarray, head_x: float, head_y: float, spacing: float) -> bool:
-    radius = max(1, int(round(0.18 * spacing)))
-    cx, cy = int(round(head_x)), int(round(head_y))
-    core = ink[max(0, cy - radius) : cy + radius + 1, max(0, cx - radius) : cx + radius + 1]
-    return core.size > 0 and float(core.mean()) < 0.35
-
-
 def _count_beams(
     ink: np.ndarray,
     x: int,

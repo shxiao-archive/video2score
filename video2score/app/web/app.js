@@ -133,6 +133,7 @@ async function refreshJobs() {
 function renderJob(job) {
   const tags = [];
   if (job.status === "failed") tags.push(h("span", { class: "tag bad" }, "失败"));
+  else if (job.status === "running") tags.push(h("span", { class: "tag bad" }, "没跑完"));
   else if (job.status === "captured") tags.push(h("span", { class: "tag" }, "只有截图谱"));
   if (job.issues) tags.push(h("span", { class: "tag warn" }, `${job.issues} 处要核对`));
   const exportSelect = h("select", { "aria-label": "补导出的格式" },
@@ -163,6 +164,12 @@ function renderJob(job) {
           refreshJobs();
         }),
       }, "删除")));
+}
+
+async function emptyTrash() {
+  if (!confirm("清空回收站？里面的谱和视频会真的删掉，不能恢复。")) return;
+  const data = await guarded(() => api("trash/empty", { json: {} }));
+  if (data) toast(`回收站已清空，腾出了 ${(data.freed / 1048576).toFixed(1)} MB`);
 }
 
 async function openDetail(id) {
@@ -306,6 +313,7 @@ function init() {
   window.addEventListener("dragover", (event) => event.preventDefault());
   window.addEventListener("drop", (event) => event.preventDefault());
   $("#login-button").addEventListener("click", openLogin);
+  $("#empty-trash").addEventListener("click", emptyTrash);
   $("#quit-button").addEventListener("click", quit);
   for (const button of document.querySelectorAll("[data-close]")) button.addEventListener("click", () => button.closest("dialog").close());
   refreshState();

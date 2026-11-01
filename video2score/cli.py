@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from video2score.jobs import load_manifest
+from video2score.jobs import check_formats, load_manifest
 from video2score.run import DEFAULT_SAMPLE_EVERY, Options, run
 
 
@@ -34,7 +34,11 @@ def main(argv: list[str] | None = None) -> int:
         from video2score.jobs import resolve_job_dir
         from video2score.run import rewrite_pdf
 
-        print(rewrite_pdf(resolve_job_dir(args.job), args.link))
+        try:
+            print(rewrite_pdf(resolve_job_dir(args.job), args.link))
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         return 0
     if args.command == "bench-pdf":
         from video2score.benchpdf import main as bench_pdf
@@ -61,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         f"{job_dir} status={manifest['status']} notation={manifest['notation']} "
         f"measures={manifest['measures']} pages={manifest['pages']}"
     )
+    problem = manifest.get("error") or manifest.get("export_error")
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
     return 0
 
 
@@ -130,18 +138,21 @@ def _export(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     from video2score.jobs import resolve_job_dir, save_manifest
-    from video2score.run import EXPORT_FORMATS, export_score
+    from video2score.run import export_score
 
     formats = _formats(args.to)
     try:
-        unknown = [item for item in formats if item not in EXPORT_FORMATS]
-        if unknown or not formats:
-            raise ValueError(f"不支持的导出格式：{', '.join(unknown) or '（空）'}（可选 {', '.join(EXPORT_FORMATS)}）")
+        check_formats(formats or ["（空）"])
         if args.job:
             job_dir = resolve_job_dir(args.job)
             manifest = load_manifest(job_dir)
-            written = export_score(job_dir, manifest, formats)
-            save_manifest(job_dir, manifest)
+            try:
+                written = export_score(job_dir, manifest, formats)
+            except Exception as exc:
+                manifest["export_error"] = f"导出没完成：{exc}"
+                raise
+            finally:
+                save_manifest(job_dir, manifest)
         else:
             from video2score.engrave import musicxml_to_pdf
             from video2score.gpfile import export
@@ -165,16 +176,23 @@ def _tab(job: str, exports: tuple[str, ...] = (), link: str | None = None) -> in
     from video2score.run import video_of, write_tab_score
 
     try:
+        check_formats(exports)
         job_dir = resolve_job_dir(job)
         manifest = load_manifest(job_dir)
         video_of(manifest, link, lambda text: print(text, file=sys.stderr))
         write_tab_score(job_dir, manifest)
+        save_manifest(job_dir, manifest)
         if exports:
             from video2score.run import export_score
 
-            for path in export_score(job_dir, manifest, exports):
-                print(path)
-        save_manifest(job_dir, manifest)
+            try:
+                for path in export_score(job_dir, manifest, exports):
+                    print(path)
+            except Exception as exc:
+                manifest["export_error"] = f"导出没完成：{exc}"
+                raise
+            finally:
+                save_manifest(job_dir, manifest)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1

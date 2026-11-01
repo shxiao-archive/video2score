@@ -11,6 +11,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+from video2score.jobs import Cancelled
+
 log = logging.getLogger("video2score")
 
 # run.run 报的阶段（进度文字开头）和它在整条进度里占的位置。逐帧找小节那段按它报的百分比在 5%~80% 之间走。
@@ -25,10 +27,6 @@ _STAGES = (
 )
 _FRAMES = re.compile(r"^\s*(\d+)%")
 _PERCENT = re.compile(r"(\d+)%")
-
-
-class Cancelled(Exception):
-    pass
 
 
 @dataclass

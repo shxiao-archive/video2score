@@ -1,9 +1,16 @@
-numpy
-opencv-python
-Pillow
-pymupdf
-curl_cffi
-qrcode
-yt-dlp
-yt-dlp-ejs
-pyguitarpro
+# 打包和 CI 都装这些版本。发版前把 yt-dlp、yt-dlp-ejs 升到最新（视频网站常变），改完跑一遍基准。
+numpy==2.5.3
+opencv-python==5.0.0.93
+Pillow==12.3.0
+pymupdf==1.28.2
+curl_cffi==0.16.3
+qrcode==8.2
+yt-dlp==2026.8.19
+yt-dlp-ejs==0.8.0
+pyguitarpro==0.11
+# 上面这些带进来的
+attrs==26.1.0
+certifi==2026.7.22
+cffi==2.1.1
+pycparser==3.0
+colorama==0.4.6; sys_platform == "win32"

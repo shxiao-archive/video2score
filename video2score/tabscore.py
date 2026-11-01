@@ -10,11 +10,13 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
+from typing import Callable
 from xml.sax.saxutils import escape
 
 import cv2
 import numpy as np
 
+from video2score.images import read_gray
 from video2score.header import key_signature
 from video2score.rhythm import BASE, Event, fermatas, read_staff_rhythm, staff5, stem_event, whole_event
 from video2score.tab import Bank, FretNote, Onset, adapted_tab_bank, bass_attacks, bends, fill_frets, mark_arcs, onsets, read_frets, tab_staff, vibratos, vote_frets
@@ -113,13 +115,13 @@ def score_marks(job_dir: Path) -> Marks:
     tab = tab_staff(first)
     prefix_path = job_dir / "measures" / "prefix.png"
     if tab is not None and prefix_path.is_file():
-        prefix = cv2.imread(str(prefix_path), cv2.IMREAD_GRAYSCALE)
+        prefix = read_gray(prefix_path)
         standard = TUNINGS.get(len(tab.lines))
         if prefix is not None and standard is not None:
             marks.tuning = read_tuning(prefix, list(tab.lines), standard)
     heads = []
     for record in library[:3]:
-        image = cv2.imread(str(job_dir / record["image"]), cv2.IMREAD_GRAYSCALE)
+        image = read_gray(job_dir / record["image"])
         if image is None:
             continue
         heads.append(
@@ -141,16 +143,17 @@ def score_marks(job_dir: Path) -> Marks:
     return marks
 
 
-def read_job(job_dir: Path) -> list[ScoreMeasure]:
-    """读一个作业的小节库，返回每小节的音符。"""
+def read_job(job_dir: Path, progress: Callable[[str], None] | None = None) -> list[ScoreMeasure]:
+    """读一个作业的小节库，返回每小节的音符。progress 定期收到进度（也是取消的机会）。"""
+    say = progress or (lambda _text: None)
     library = json.loads((job_dir / "measures.json").read_text(encoding="utf-8"))
     loaded = []
     for record in library:
         # 参考帧在前，后面是另外几帧（和参考帧对齐过）；每帧各读一遍再投票。
         paths = [record.get("raw") or record["image"]] + list(record.get("raws") or [])
-        images = [cv2.imread(str(job_dir / path), cv2.IMREAD_GRAYSCALE) for path in paths]
+        images = [read_gray(job_dir / path) for path in paths]
         images = [image for image in images if image is not None]
-        clean = cv2.imread(str(job_dir / record["image"]), cv2.IMREAD_GRAYSCALE) if record.get("raw") else None
+        clean = read_gray(job_dir / record["image"]) if record.get("raw") else None
         loaded.append((record, images, tab_staff(record), staff5(record), clean))
     loaded = _cut_merged(loaded)
     library = [record for record, *_rest in loaded]
@@ -158,10 +161,11 @@ def read_job(job_dir: Path) -> list[ScoreMeasure]:
     thick = _upscaled(job_dir)
     opening = _opening_key(loaded)
     bank = adapted_tab_bank([(images[0], tab, tuple(record["bars"])) for record, images, tab, _staff, _clean in loaded if tab])
-    candidates = [
-        _read_measure(record, images, tab, staff, bank, clean, start, thick, opening)
-        for (record, images, tab, staff, clean), start in zip(loaded, starts)
-    ]
+    candidates = []
+    for index, ((record, images, tab, staff, clean), start) in enumerate(zip(loaded, starts)):
+        if index % 10 == 0:
+            say(f"读 TAB 和节奏 {index}/{len(loaded)}……")
+        candidates.append(_read_measure(record, images, tab, staff, bank, clean, start, thick, opening))
     measures = _choose(candidates)
     for measure, record in zip(measures, library):
         measure.seconds, measure.seen = record.get("first_seconds"), int(record.get("seen") or 0)
@@ -177,7 +181,7 @@ def read_job(job_dir: Path) -> list[ScoreMeasure]:
     digits: list[list[np.ndarray]] = []
     rests: list[bool] = []
     for record in library:
-        clean = cv2.imread(str(job_dir / record["image"]), cv2.IMREAD_GRAYSCALE)
+        clean = read_gray(job_dir / record["image"])
         spacing = float(record["spacing"])
         top = float(record["staff_top"]) + float(record["lines"][0])
         bars = (int(record["bars"][0]), int(record["bars"][-1]))

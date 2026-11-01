@@ -4,14 +4,15 @@ python -m video2score bench-pdf                  全部（复用每个视频最�
 python -m video2score bench-pdf --rerun          重新跑视频
 python -m video2score bench-pdf <曲名> <曲名>     只跑这几首（jobs/_user_test 下的文件夹名）
 
-测试集在 jobs/_user_test/<曲名>/：标准答案（MusicXML 优先，.musicxml 或 GP8 导出的 .xml；没有就用 Guitar Pro 导出的原谱 PDF），加上视频（source-1080.mp4 或
-source.mp4；没有的话按 source.txt 里的 B 站链接下载成 source.mp4）。每首的明细写到作业目录的 compare.txt。
+测试集在 jobs/_user_test/<曲名>/：标准答案（MusicXML 优先，.musicxml 或 GP8 导出的 .xml；没有就用 Guitar Pro 导出的原谱 PDF；只有 .gp 时只比小节数），
+加上视频（source-1080.mp4 或 source.mp4；没有的话按 source.txt 里的 B 站链接下载成 source.mp4）。每首的明细写到作业目录的 compare.txt。
 """
 
 from __future__ import annotations
 
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 from video2score.compare import align_structure, compare, compare_xml
@@ -35,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         # 标准答案：有 MusicXML 用 MusicXML（逐音校对过），没有再读原谱 PDF。
         # GP8 导出的 MusicXML 扩展名是 .xml。
-        answers = sorted(folder.glob("*.musicxml")) or sorted(folder.glob("*.xml")) or sorted(folder.glob("*.pdf"))
+        answers = sorted(folder.glob("*.musicxml")) or sorted(folder.glob("*.xml")) or sorted(folder.glob("*.pdf")) or sorted(folder.glob("*.gp"))
         if not answers:
             continue
         started = time.time()
@@ -50,6 +51,14 @@ def main(argv: list[str] | None = None) -> int:
             write_tab_score(job_dir, manifest, title=folder.name)
             save_manifest(job_dir, manifest)
             measures = read_job(job_dir)
+            if answers[0].suffix.lower() == ".gp":
+                # 没有读 .gp 的代码，只比小节数：丢没丢小节一眼能看出来。
+                bars = f"小节数 答案 {_gp_bars(answers[0])} / 我们 {sum(1 + item.rests_after for item in measures)}"
+                ink = check_job(job_dir)
+                (job_dir / "compare.txt").write_text(f"{bars}\n{ink.summary()}\n", encoding="utf-8")
+                rows.append(f"{folder.name}（{job_dir.name}，{time.time() - started:.0f} 秒）\n  {bars}\n  {ink.summary()}")
+                print(rows[-1], flush=True)
+                continue
             reference = read_reference(answers[0])
             structure = align_structure(measures, reference)
             direct = None
@@ -75,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(rows[-1], flush=True)
     return 0
+
+
+def _gp_bars(path: Path) -> int:
+    with zipfile.ZipFile(path) as archive:
+        return archive.read("Content/score.gpif").count(b"<MasterBar>")
 
 
 def _video(folder: Path) -> Path:

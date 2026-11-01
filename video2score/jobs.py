@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,17 @@ MANIFEST_VERSION = 2
 SOURCE_TYPES = {"local", "bilibili", "url"}
 NOTATIONS = {"staff", "tab", "staff+tab"}
 STATUSES = {"captured", "failed", "omr_done"}
+EXPORT_FORMATS = ("gp", "gpx", "gp5", "pdf")
+
+
+class Cancelled(BaseException):
+    """用户点了取消。不是 Exception：路上那些"出错就重试、就记一句"的 except 不该把它吞掉。"""
+
+
+def check_formats(formats: tuple[str, ...] | list[str]) -> None:
+    unknown = [item for item in formats if item not in EXPORT_FORMATS]
+    if unknown:
+        raise ValueError(f"不支持的导出格式：{', '.join(unknown)}（可选 {', '.join(EXPORT_FORMATS)}）")
 
 
 def new_job_dir() -> Path:
@@ -54,10 +66,11 @@ def load_manifest(job_dir: Path) -> dict[str, Any]:
 def save_manifest(job_dir: Path, data: dict[str, Any], *, strict: bool = True) -> None:
     if strict:
         validate_manifest(data)
-    manifest_path(job_dir).write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    # 先写临时文件再换名：写到一半崩溃时，旧的 manifest 还在。
+    path = manifest_path(job_dir)
+    temp = path.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp, path)
 
 
 def relative_to_job(job_dir: Path, path: Path) -> str:

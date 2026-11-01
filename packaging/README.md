@@ -34,11 +34,12 @@ YouTube 视频要能正常访问 YouTube：平时用代理的话，打开系统�
 video2score/
   data/jobs/      每首谱一个文件夹
   data/uploads/   拖进来的视频
-  data/trash/     页面上删除的谱（需要时可以拿回来）
+  data/trash/     页面上删除的谱和只有它用的视频（需要时可以拿回来）
   data/config/    B 站登录信息
   data/logs/      运行日志（出问题时可以发给作者）
 ```
 
+- **腾空间**：页面上"我的谱"右边的"清空回收站"会真的删掉 `data/trash/` 里的东西。
 - **卸载**：直接删掉整个 `video2score` 文件夹。
 - **升级**：解压新版本后，把旧版本的 `data` 文件夹拷进去。
 
