@@ -161,7 +161,7 @@ def find_systems(rgb: np.ndarray, cover: float = 0.40) -> list[System]:
         return _line_coloured(rgb, gray, staff, _dark_bars(gray, staff, strong_bars(ink, staff.top, staff.bottom, cover)))
 
     bars = [staff_bars(staff, 0.85) for staff in staves]
-    # 配对那一组上已经有整根的线时，别的组上贯穿六成就够：画面角上固定的半透明台标会盖掉五线谱最上面一截小节线。
+    # 配对那一组上已经有整根的线时，别的组上贯穿六成就够：画面角上固定的半透明水印会盖掉五线谱最上面一截小节线。
     partial = [staff_bars(staff, 0.6) for staff in staves]
     width = gray.shape[1]
     systems: list[System] = []
