@@ -206,7 +206,7 @@ def _notices() -> str:
         f"{APP} {__version__} includes the third-party software listed below, under their own licenses.\n"
     ]
     seen: set[str] = set()
-    queue = [line.split("==")[0].split(">=")[0].strip() for line in (ROOT / "requirements.txt").read_text().splitlines() if line.strip() and not line.startswith("#")]
+    queue = [line.split("==")[0].split(">=")[0].strip() for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
     queue += ["certifi", "cffi"]
     while queue:
         name = queue.pop(0)
