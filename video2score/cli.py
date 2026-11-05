@@ -79,7 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     run_parser = commands.add_parser("run", help="下载或读取视频，输出 score.pdf 和小节库")
-    run_parser.add_argument("--source", required=True, help="B 站链接、BV 号、YouTube 链接、其他视频网站链接或本地视频")
+    run_parser.add_argument("--source", required=True, help="B 站链接、BV 号、YouTube 链接、其他视频网站链接、本地视频或本地 PDF 谱")
     run_parser.add_argument(
         "--notation",
         choices=("staff", "tab", "staff+tab"),

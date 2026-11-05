@@ -34,7 +34,7 @@
 
 **使用步骤**：
 1. **启动程序**：Windows 双击 `video2score.exe`，macOS 双击 `video2score.app`，浏览器将自动打开操作页面。
-2. **提交任务**：粘贴视频链接（B 站链接 / BV 号 / YouTube 链接）或拖入本地视频文件，选择导出格式后点击“开始转谱”。
+2. **提交任务**：粘贴视频链接（B 站链接 / BV 号 / YouTube 链接）或拖入本地视频文件，也可以拖入 Guitar Pro 导出的 PDF 谱（截图谱、扫描件暂不支持），选择导出格式后点击“开始转谱”。
 3. **获取产物**：转换完成后，在“我的谱”中查看和下载对应文件。对低置信度的小节，可在“看要核对的小节”中结合原图核对。
 
 ---
@@ -65,7 +65,7 @@ python packaging/build.py --browser
 python -m video2score app
 
 # 或直接通过命令行处理视频
-python -m video2score run --source "<视频链接或文件路径>" --export pdf,gp
+python -m video2score run --source "<视频链接、视频文件或 PDF 路径>" --export pdf,gp
 ```
 
 ---

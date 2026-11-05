@@ -70,93 +70,10 @@ def run(
     # 一开始就写下来：进程半路被杀，界面上还能看见这个作业。
     save_manifest(job_dir, manifest, strict=False)
     try:
-        say("取视频……")
-        video = fetch_video(source, kind, job_dir / "download", say)
-        video_of(manifest, options.link, say)
-        title, artist, credit = score_info(manifest)
-        fps, frame_count = video_info(video)
-        say("看谱面是哪一种……")
-        mode = survey(video, start_sec=options.start_sec, end_sec=options.end_sec, ratios=options.ratios)
-        say(f"  {mode.describe()}")
-        tracker = Tracker()
-        finder = MeasureFinder(options.ratios, mode.scale, mode.layout == "page")
-        sampled = 0
-        say("逐帧找小节……")
-        # closing：半路取消时马上关掉视频文件，不然 Windows 上删不掉作业目录。
-        with contextlib.closing(iter_frames(video, sample_every=options.sample_every, start_sec=options.start_sec, end_sec=options.end_sec)) as frames:
-            for frame in frames:
-                sampled += 1
-                found = finder(frame)
-                if found is not None:
-                    tracker.add(found)
-                if sampled % 100 == 0 and frame_count:
-                    say(f"  {frame.index / frame_count:.0%}  已收 {len(tracker.slots)} 个小节")
-        manifest["sampling"] = {
-            "every": options.sample_every,
-            "frames": sampled,
-            "fps": round(fps, 3),
-            "polarity": finder.polarity,
-            "mode": mode.to_json(),
-            "transitions": summary(tracker),
-        }
-        slots = ordered_slots(tracker)
-        if not slots:
-            raise RuntimeError("没有找到完整的小节。请确认画面里有谱线和小节线，或用 --crop-* 指定谱面区域。")
-        say("读小节号……")
-        slots, numbering = arrange(slots)
-        # 号断了档的地方，到只出现过一两帧的碎片里找回来。
-        slots, rescued = rescue(slots, fragments(tracker))
-        manifest["numbers"] = {
-            "read": numbering.read,
-            "total": numbering.total,
-            "moved": numbering.moved,
-            "merged": numbering.merged,
-            "split": numbering.split,
-            "cleared": numbering.cleared,
-            "rescued": rescued,
-            "jumps": gaps(slots),
-        }
-        cleaned = []
-        for index, slot in enumerate(slots):
-            if index % 10 == 0:
-                say(f"清洗 {index}/{len(slots)}……")
-            cleaned.append(render_slot(slot))
-        library = _save_library(job_dir, slots, cleaned)
-        # 乐谱最开头第一小节左边的乐器名、调弦字母。
-        prefix = render_prefix(slots)
-        if prefix is not None:
-            write_image(job_dir / _PREFIX, prefix)
-        say("排版……")
-        pdf_path = job_dir / "score.pdf"
-        pages = write_score_pdf(pdf_path, cleaned, [slot.number for slot in slots], title, prefix, artist, credit)
-        manifest["notation"] = options.notation or _notation(cleaned)
-        manifest["measures"] = len(slots)
-        manifest["pages"] = len(pages)
-        manifest["artifacts"] = {
-            "pdf": relative_to_job(job_dir, pdf_path),
-            "library": relative_to_job(job_dir, library),
-            "measures": "measures",
-        }
-        if prefix is not None:
-            manifest["artifacts"]["prefix"] = _PREFIX
-        manifest["status"] = "captured"
-        manifest.pop("pid")
-        # 截图谱已经有了：后面哪一步出错都不算整个作业失败，记一句，界面和命令行都会提示。
-        if "tab" in manifest["notation"]:
-            try:
-                say("读 TAB 和节奏……")
-                write_tab_score(job_dir, manifest, progress=say)
-            except Exception as exc:
-                manifest["error"] = f"读 TAB 没完成：{exc}"
-            else:
-                if options.exports:
-                    say("导出 " + "、".join(options.exports) + "……")
-                    try:
-                        export_score(job_dir, manifest, options.exports)
-                    except Exception as exc:
-                        manifest["export_error"] = f"导出没完成：{exc}"
-        if options.debug:
-            _write_debug(job_dir, tracker, slots)
+        if is_pdf(kind, ref):
+            _run_pdf(job_dir, manifest, Path(ref), options, say)
+        else:
+            _run_video(job_dir, manifest, source, kind, options, say)
         save_manifest(job_dir, manifest)
         return job_dir
     except Cancelled:
@@ -169,6 +86,144 @@ def run(
         manifest.pop("pid", None)
         save_manifest(job_dir, manifest, strict=False)
         raise
+
+
+def is_pdf(kind: str, ref: str) -> bool:
+    return kind == "local" and Path(ref).suffix.lower() == ".pdf"
+
+
+def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, options: Options, say: Callable[[str], None]) -> None:
+    say("取视频……")
+    video = fetch_video(source, kind, job_dir / "download", say)
+    video_of(manifest, options.link, say)
+    fps, frame_count = video_info(video)
+    say("看谱面是哪一种……")
+    mode = survey(video, start_sec=options.start_sec, end_sec=options.end_sec, ratios=options.ratios)
+    say(f"  {mode.describe()}")
+    tracker = Tracker()
+    finder = MeasureFinder(options.ratios, mode.scale, mode.layout == "page")
+    sampled = 0
+    say("逐帧找小节……")
+    # closing：半路取消时马上关掉视频文件，不然 Windows 上删不掉作业目录。
+    with contextlib.closing(iter_frames(video, sample_every=options.sample_every, start_sec=options.start_sec, end_sec=options.end_sec)) as frames:
+        for frame in frames:
+            sampled += 1
+            found = finder(frame)
+            if found is not None:
+                tracker.add(found)
+            if sampled % 100 == 0 and frame_count:
+                say(f"  {frame.index / frame_count:.0%}  已收 {len(tracker.slots)} 个小节")
+    manifest["sampling"] = {
+        "every": options.sample_every,
+        "frames": sampled,
+        "fps": round(fps, 3),
+        "polarity": finder.polarity,
+        "mode": mode.to_json(),
+        "transitions": summary(tracker),
+    }
+    slots = ordered_slots(tracker)
+    if not slots:
+        raise RuntimeError("没有找到完整的小节。请确认画面里有谱线和小节线，或用 --crop-* 指定谱面区域。")
+    say("读小节号……")
+    slots, numbering = arrange(slots)
+    # 号断了档的地方，到只出现过一两帧的碎片里找回来。
+    slots, rescued = rescue(slots, fragments(tracker))
+    manifest["numbers"] = {
+        "read": numbering.read,
+        "total": numbering.total,
+        "moved": numbering.moved,
+        "merged": numbering.merged,
+        "split": numbering.split,
+        "cleared": numbering.cleared,
+        "rescued": rescued,
+        "jumps": gaps(slots),
+    }
+    _finish(job_dir, manifest, slots, options, say)
+    if options.debug:
+        _write_debug(job_dir, tracker, slots)
+
+
+def _run_pdf(job_dir: Path, manifest: dict[str, Any], pdf: Path, options: Options, say: Callable[[str], None]) -> None:
+    """PDF：只收 Guitar Pro 导出的矢量谱，直接读文字和线条。截图拼的、扫描的按图识别不如转视频，不做。"""
+    from video2score.vectorpdf import is_gp_vector
+
+    if not pdf.is_file():
+        raise FileNotFoundError(f"找不到 {pdf}")
+    if not is_gp_vector(pdf):
+        raise RuntimeError("只支持 Guitar Pro 导出的 PDF 谱。截图谱、扫描件请改用原视频转。")
+    video_of(manifest, options.link, say)
+    _run_vector(job_dir, manifest, pdf, options, say)
+
+
+def _run_vector(job_dir: Path, manifest: dict[str, Any], pdf: Path, options: Options, say: Callable[[str], None]) -> None:
+    """GP 矢量谱：score.pdf 就是原 PDF；小节库只记每小节的号、页、方框（没有识别问题要配图，不裁小节图）。"""
+    from video2score.reference import read_reference
+
+    say("读矢量谱……")
+    measures = read_reference(pdf)
+    if not measures:
+        raise RuntimeError("PDF 里没有读到小节。")
+    shutil.copyfile(pdf, job_dir / "score.pdf")
+    records = [{"index": index, "number": measure.number, "page": measure.page, "box": [round(value, 1) for value in measure.box or ()]} for index, measure in enumerate(measures, start=1)]
+    library = job_dir / "measures.json"
+    library.write_text(json.dumps(records, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    manifest["pages"] = max(measure.page for measure in measures) + 1
+    manifest["vector"] = True
+    manifest["notation"] = options.notation or ("staff+tab" if any(measure.strings for measure in measures) else "staff")
+    manifest["measures"] = len(measures)
+    manifest["artifacts"] = {"pdf": "score.pdf", "library": relative_to_job(job_dir, library)}
+    manifest["status"] = "captured"
+    manifest.pop("pid")
+    _tab_and_export(job_dir, manifest, options, say)
+
+
+def _finish(job_dir: Path, manifest: dict[str, Any], slots: list[Slot], options: Options, say: Callable[[str], None]) -> None:
+    """排好序、定了号的小节 → 清洗、小节库、截图谱 PDF，再读 TAB、导出。"""
+    title, artist, credit = score_info(manifest)
+    cleaned = []
+    for index, slot in enumerate(slots):
+        if index % 10 == 0:
+            say(f"清洗 {index}/{len(slots)}……")
+        cleaned.append(render_slot(slot))
+    library = _save_library(job_dir, slots, cleaned)
+    # 乐谱最开头第一小节左边的乐器名、调弦字母。
+    prefix = render_prefix(slots)
+    if prefix is not None:
+        write_image(job_dir / _PREFIX, prefix)
+    say("排版……")
+    pdf_path = job_dir / "score.pdf"
+    pages = write_score_pdf(pdf_path, cleaned, [slot.number for slot in slots], title, prefix, artist, credit)
+    manifest["notation"] = options.notation or _notation(cleaned)
+    manifest["measures"] = len(slots)
+    manifest["pages"] = len(pages)
+    manifest["artifacts"] = {
+        "pdf": relative_to_job(job_dir, pdf_path),
+        "library": relative_to_job(job_dir, library),
+        "measures": "measures",
+    }
+    if prefix is not None:
+        manifest["artifacts"]["prefix"] = _PREFIX
+    manifest["status"] = "captured"
+    manifest.pop("pid")
+    _tab_and_export(job_dir, manifest, options, say)
+
+
+def _tab_and_export(job_dir: Path, manifest: dict[str, Any], options: Options, say: Callable[[str], None]) -> None:
+    # 截图谱已经有了：后面哪一步出错都不算整个作业失败，记一句，界面和命令行都会提示。
+    if "tab" not in manifest["notation"]:
+        return
+    try:
+        say("读 TAB 和节奏……")
+        write_tab_score(job_dir, manifest, progress=say)
+    except Exception as exc:
+        manifest["error"] = f"读 TAB 没完成：{exc}"
+        return
+    if options.exports:
+        say("导出 " + "、".join(options.exports) + "……")
+        try:
+            export_score(job_dir, manifest, options.exports)
+        except Exception as exc:
+            manifest["export_error"] = f"导出没完成：{exc}"
 
 
 def skipped_measures(measures: list[ScoreMeasure]) -> list[tuple[int, int]]:
@@ -195,25 +250,35 @@ def write_tab_score(job_dir: Path, manifest: dict[str, Any], title: str | None =
     曲名、原唱、出处（视频作者和链接）按作业的视频信息写；给了 title 就用它当曲名。
     """
     found, artist, credit = score_info(manifest)
-    measures = read_job(job_dir, progress)
     path = job_dir / "score.musicxml"
-    marks = score_marks(job_dir)
-    if marks.tempo is None:
-        # 画面里没印速度：按每格出现在画面上的时间估一个。
-        marks.tempo = estimate_tempo(measures)
-        marks.tempo_estimated = marks.tempo is not None
-    write_musicxml(path, measures, title=title or found, marks=marks, artist=artist, rights=credit)
+    where = "PDF" if manifest.get("vector") else "视频"
+    if manifest.get("vector"):
+        # GP 矢量谱：重新读一遍 score.pdf（就是原 PDF），速度、调弦、演奏法都从矢量里来。
+        from video2score.vectorpdf import write_score
+
+        if progress:
+            progress("读矢量谱……")
+        measures, tempo = write_score(job_dir / "score.pdf", path, title or found, artist, credit)
+        tempo_text = [] if tempo else ["速度：PDF 里没印"]
+    else:
+        measures = read_job(job_dir, progress)
+        marks = score_marks(job_dir)
+        if marks.tempo is None:
+            # 画面里没印速度：按每格出现在画面上的时间估一个。
+            marks.tempo = estimate_tempo(measures)
+            marks.tempo_estimated = marks.tempo is not None
+        write_musicxml(path, measures, title=title or found, marks=marks, artist=artist, rights=credit)
+        tempo_text = [f"速度：画面里没印，按视频时间估成 {marks.tempo}"] if marks.tempo_estimated else []
     issues = [
         f"第 {measure.number if measure.number is not None else '?'} 小节：{issue}"
         for measure in measures
         for issue in measure.issues
     ]
     # 整首的提醒排在前面：没有对应的小节图。
-    overall = [f"速度：画面里没印，按视频时间估成 {marks.tempo}"] if marks.tempo_estimated else []
-    overall += [f"第 {first} 小节：视频里没读到，谱里缺了这一小节，请对照视频补上" if first == last else f"第 {first}~{last} 小节：视频里没读到，谱里缺了这几小节，请对照视频补上" for first, last in skipped_measures(measures)]
+    overall = tempo_text + [f"第 {first} 小节：{where}里没读到，谱里缺了这一小节，请对照{where}补上" if first == last else f"第 {first}~{last} 小节：{where}里没读到，谱里缺了这几小节，请对照{where}补上" for first, last in skipped_measures(measures)]
     (job_dir / "tab_issues.txt").write_text("\n".join(overall + issues) + "\n", encoding="utf-8")
     listed = [{"number": None, "image": None, "issues": [text]} for text in overall]
-    listed += [{"number": measure.number, "image": measure.image, "issues": measure.issues} for measure in measures if measure.issues]
+    listed += [{"number": measure.number, "image": getattr(measure, "image", None), "issues": measure.issues} for measure in measures if measure.issues]
     (job_dir / "tab_issues.json").write_text(json.dumps(listed, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     manifest["tab"] = tab_summary(measures)
     manifest["artifacts"]["musicxml"] = relative_to_job(job_dir, path)
@@ -306,6 +371,8 @@ def fill_numbers(numbers: list[int | None], rests: list[bool] | None = None) -> 
 def rewrite_pdf(job_dir: Path, link: str | None = None) -> Path:
     """用小节库里已经清洗好的图重新排版（不重跑视频）。"""
     manifest = load_manifest(job_dir)
+    if manifest.get("vector"):
+        raise RuntimeError("这个作业是矢量 PDF 转的，score.pdf 就是原谱，不用重新排版。")
     video_of(manifest, link)
     title, artist, credit = score_info(manifest)
     library = json.loads((job_dir / "measures.json").read_text(encoding="utf-8"))

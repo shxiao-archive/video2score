@@ -27,6 +27,12 @@ layout / header            --> 统一线距，行宽微调补齐，输出 score.
 gpfile / engrave           --> 导出 .gp / .gpx / .gp5，通过 alphaTab 输出印刷级 PDF
 ```
 
+PDF 输入（见 SPECIFICATION 2.4）：
+
+```text
+PDF（只收 GP 导出的矢量谱）--> vectorpdf / reference：直接读文字和线条 --> score.musicxml --> 导出
+```
+
 ---
 
 ## 2. 核心记号判定速查

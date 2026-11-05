@@ -60,7 +60,7 @@ def gp_attack(notations: ET.Element | None) -> str | None:
 
 
 def bend_amount(text: str | None) -> str:
-    """推弦幅度（全音为 1）统一写法：0.5、1、1.5。"""
+    """推弦幅度（bend-alter，半音数）统一写法：0.5、1、1.5。"""
     value = float(text or 0)
     return str(int(value)) if value == int(value) else str(value)
 

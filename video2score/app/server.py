@@ -135,7 +135,7 @@ class App:
             save_manifest(job, manifest)
 
     def upload(self, name: str, size: int, stream) -> Path:
-        """拖进来的视频存到 uploads/，按本地视频转谱。同一个文件再拖一次直接用旧的；同名但内容不同的加序号。"""
+        """拖进来的视频或 PDF 存到 uploads/，按本地文件转谱。同一个文件再拖一次直接用旧的；同名但内容不同的加序号。"""
         name = re.sub(r'[\\/:*?"<>|\r\n]+', "_", Path(name).name).strip() or "video.mp4"
         paths.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         part = paths.UPLOADS_DIR / f"{secrets.token_hex(8)}.part"

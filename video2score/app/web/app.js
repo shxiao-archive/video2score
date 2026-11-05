@@ -1,6 +1,6 @@
 "use strict";
 
-// 视频转谱的页面：新建转谱（链接或拖入视频）、进行中的任务、我的谱（历史作业）、作业详情（有问题的小节）、B 站扫码登录。
+// 视频转谱的页面：新建转谱（链接或拖入视频、PDF）、进行中的任务、我的谱（历史作业）、作业详情（有问题的小节）、B 站扫码登录。
 const TOKEN = document.querySelector('meta[name="token"]').content;
 const $ = (selector) => document.querySelector(selector);
 
@@ -197,7 +197,7 @@ let chosenFile = null;
 function chooseFile(file) {
   chosenFile = file || null;
   $("#drop").classList.toggle("chosen", Boolean(chosenFile));
-  $("#drop-text").textContent = chosenFile ? `已选：${chosenFile.name}（点这里换一个）` : "或者把视频文件拖到这里（也可以点这里选择）";
+  $("#drop-text").textContent = chosenFile ? `已选：${chosenFile.name}（点这里换一个）` : "或者把视频文件或 Guitar Pro 导出的 PDF 拖到这里（也可以点这里选择）";
   $("#link-row").hidden = !chosenFile;
   if (chosenFile) $("#source").value = "";
 }
@@ -234,7 +234,7 @@ async function startConvert(event) {
       source = saved.path;
       label = chosenFile.name;
     }
-    if (!source) throw new Error("请粘贴视频链接，或拖入一个视频文件。");
+    if (!source) throw new Error("请粘贴视频链接，或拖入一个视频文件或 PDF 谱。");
     await api("convert", { json: { source, label, exports, link: chosenFile ? $("#link").value.trim() : null } });
     $("#source").value = "";
     $("#link").value = "";

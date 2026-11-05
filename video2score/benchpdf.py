@@ -3,6 +3,7 @@
 python -m video2score bench-pdf                  全部（复用每个视频最近一次的作业）
 python -m video2score bench-pdf --rerun          重新跑视频
 python -m video2score bench-pdf <曲名> <曲名>     只跑这几首（jobs/_user_test 下的文件夹名）
+python -m video2score bench-pdf --pdf            改成从原谱 PDF（GP 导出的矢量谱）转
 
 测试集在 jobs/_user_test/<曲名>/：标准答案（MusicXML 优先，.musicxml 或 GP8 导出的 .xml；没有就用 Guitar Pro 导出的原谱 PDF；只有 .gp 时只比小节数），
 加上视频（source-1080.mp4 或 source.mp4；没有的话按 source.txt 里的 B 站链接下载成 source.mp4）。每首的明细写到作业目录的 compare.txt。
@@ -30,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     rerun = "--rerun" in args
     wanted = {arg for arg in args if not arg.startswith("--")}
+    if "--pdf" in args:
+        return _pdf_bench(wanted)
     rows: list[str] = []
     for folder in sorted(TEST_DIR.iterdir()):
         if not folder.is_dir() or (wanted and folder.name not in wanted):
@@ -83,6 +86,24 @@ def main(argv: list[str] | None = None) -> int:
             + ("\n  " + direct.summary().replace("\n", "\n  ") if direct is not None else "")
         )
         print(rows[-1], flush=True)
+    return 0
+
+
+def _pdf_bench(wanted: set[str]) -> int:
+    """PDF 输入：每首的原谱 PDF 转一遍，和 MusicXML 答案比。"""
+    for folder in sorted(TEST_DIR.iterdir()):
+        answers = sorted(folder.glob("*.musicxml")) or sorted(folder.glob("*.xml"))
+        if not folder.is_dir() or (wanted and folder.name not in wanted) or not answers:
+            continue
+        for pdf in sorted(folder.glob("*.pdf"))[:1]:
+            started = time.time()
+            try:
+                job_dir = run(str(pdf), Options(), progress=None)
+                result = compare_xml(job_dir / "score.musicxml", answers[0])
+                text = result.summary().replace("\n", "\n  ")
+            except Exception as exc:
+                text = f"出错 {exc}"
+            print(f"{folder.name}（{time.time() - started:.0f} 秒）\n  {text}", flush=True)
     return 0
 
 
