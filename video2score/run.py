@@ -3,25 +3,26 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import shutil
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import cv2
 import numpy as np
 
 from video2score.images import read_gray, write_image
 from video2score.clean import CleanMeasure, render_prefix, render_slot
-from video2score.frames import iter_frames, video_info
+from video2score.frames import frames_between, iter_frames, video_info
 from video2score.header import Header, content_start, erase_label_after_header, extract_header
 from video2score.tidy import geometry, has_multirest
 from video2score.jobs import Cancelled, MANIFEST_VERSION, check_formats, load_manifest, new_job_dir, relative_to_job, save_manifest
 from video2score.layout import layout_rows, paginate, write_pdf
-from video2score.measures import PAD_ABOVE, MeasureFinder
+from video2score.measures import PAD_ABOVE, FrameMeasures, MeasureFinder
 from video2score.paths import UPLOADS_DIR
 from video2score.order import arrange, gaps, rescue
 from video2score.tabscore import ScoreMeasure, estimate_tempo, read_job, score_marks, write_musicxml
@@ -92,6 +93,25 @@ def is_pdf(kind: str, ref: str) -> bool:
     return kind == "local" and Path(ref).suffix.lower() == ".pdf"
 
 
+def _rescan_tail(tracker: Tracker, found: Iterable[FrameMeasures]) -> list[Slot]:
+    """补看结尾的几帧，返回要接在最后一格后面的小节。原有的槽位不动。
+
+    只收补看帧里出现在原来最后一格右边、补看后够次数的：谱面淡出时同一屏的小节常认不出来、
+    另起了槽位，它们排在中间或开头，多看几帧也会凑够次数。原有槽位也不收淡出帧的观测，免得被换成淡掉的画面。
+    """
+    kept = ordered_slots(tracker)
+    if not kept:
+        return []
+    known = {slot.id for slot in kept}
+    trial = copy.deepcopy(tracker)
+    following: set[int] = set()
+    for item in found:
+        ids = [slot.id for slot in trial.add(item)]
+        if kept[-1].id in ids:
+            following.update(ids[ids.index(kept[-1].id) + 1 :])
+    return [slot for slot in ordered_slots(trial) if slot.id in following and slot.id not in known]
+
+
 def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, options: Options, say: Callable[[str], None]) -> None:
     say("取视频……")
     video = fetch_video(source, kind, job_dir / "download", say)
@@ -103,6 +123,9 @@ def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, 
     tracker = Tracker()
     finder = MeasureFinder(options.ratios, mode.scale, mode.layout == "page")
     sampled = 0
+    # 最后一次找到谱面的帧，和它之后第一个没找到的采样帧。
+    last_seen: int | None = None
+    gone: int | None = None
     say("逐帧找小节……")
     # closing：半路取消时马上关掉视频文件，不然 Windows 上删不掉作业目录。
     with contextlib.closing(iter_frames(video, sample_every=options.sample_every, start_sec=options.start_sec, end_sec=options.end_sec)) as frames:
@@ -111,8 +134,16 @@ def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, 
             found = finder(frame)
             if found is not None:
                 tracker.add(found)
+                last_seen, gone = frame.index, None
+            elif last_seen is not None and gone is None:
+                gone = frame.index
             if sampled % 100 == 0 and frame_count:
                 say(f"  {frame.index / frame_count:.0%}  已收 {len(tracker.slots)} 个小节")
+    late: list[Slot] = []
+    if last_seen is not None and gone is not None:
+        # 视频常在最后一小节刚整格露出来时就切走，两个采样帧之间那几帧才看得到它：这一段逐帧补看。
+        with contextlib.closing(frames_between(video, last_seen + 1, gone)) as frames:
+            late = _rescan_tail(tracker, (found for frame in frames if (found := finder(frame)) is not None))
     manifest["sampling"] = {
         "every": options.sample_every,
         "frames": sampled,
@@ -121,13 +152,14 @@ def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, 
         "mode": mode.to_json(),
         "transitions": summary(tracker),
     }
-    slots = ordered_slots(tracker)
+    slots = ordered_slots(tracker) + late
     if not slots:
         raise RuntimeError("没有找到完整的小节。请确认画面里有谱线和小节线，或用 --crop-* 指定谱面区域。")
     say("读小节号……")
     slots, numbering = arrange(slots)
     # 号断了档的地方，到只出现过一两帧的碎片里找回来。
-    slots, rescued = rescue(slots, fragments(tracker))
+    late_ids = {slot.id for slot in late}
+    slots, rescued = rescue(slots, [slot for slot in fragments(tracker) if slot.id not in late_ids])
     manifest["numbers"] = {
         "read": numbering.read,
         "total": numbering.total,

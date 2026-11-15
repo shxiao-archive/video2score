@@ -548,10 +548,12 @@ def _circle_digit(glyph: _Glyph, ink: np.ndarray) -> _Glyph | None:
 
 
 def _looks_like_rest(glyph: _Glyph) -> bool:
-    """GP 画在 TAB 里的八分、十六分休止符：像 7，但左上角是一个实心圆头。"""
+    """GP 画在 TAB 里的八分、十六分休止符：像 7，但左上角是一个实心圆头。
+    粗体的 7 顶横很厚，左上角也几乎填满；但它最顶上几行墨从左连到右，圆头顶上只有左边一小段（约半个字宽）。"""
     height, width = glyph.mask.shape
     corner = glyph.mask[: max(1, height // 3), : max(1, width // 2)]
-    return float(corner.mean()) >= 0.55
+    top = glyph.mask[: max(1, round(0.15 * height))]
+    return float(corner.mean()) >= 0.55 and max(_longest_run(row) for row in top) < 0.75 * width
 
 
 def _rejoin(

@@ -79,7 +79,7 @@ def render_slot(slot: Slot) -> CleanMeasure:
         left_bar=margin,
         right_bar=right_bar,
         # 识别用单独一帧：多帧投票会把一两像素宽的细笔画投掉（各帧错开一个像素就对不上）。
-        **_raws(reference, used, stack, valid, everything),
+        **_raws(reference, used, stack, valid, everything, tinted, darkness > _PAPER),
     )
 
 
@@ -191,6 +191,8 @@ def _raws(
     stack: np.ndarray,
     valid: np.ndarray,
     voted: np.ndarray,
+    tinted: np.ndarray,
+    ink: np.ndarray,
 ) -> dict[str, object]:
     """给识别用的单帧图：看得到整个小节的观测里，背景最干净的几帧。
 
@@ -208,7 +210,9 @@ def _raws(
     if not ranked:
         return {"raw": (255 - reference.darkness).astype(np.uint8), "extra_raws": []}
     picks = ranked[: 1 + EXTRA_RAWS]
-    images = [(255 - np.clip(stack[index], 0, 255)).astype(np.uint8) for index in picks]
+    # 彩色像素在 stack 里记成了纸。有的视频压缩后黑字边缘带一圈色边（2×2 一块），细笔画被抠断（6 断成像 5）。
+    # 投票结果是墨的地方还回它本来的深浅；光标、高亮划过纸的地方仍是纸。
+    images = [(255 - np.clip(np.where(ink, np.maximum(stack[index], tinted[index]), stack[index]), 0, 255)).astype(np.uint8) for index in picks]
     return {"raw": images[0], "extra_raws": images[1:]}
 
 

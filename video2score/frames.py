@@ -53,6 +53,21 @@ def iter_frames(
         raise RuntimeError("没有读到视频帧。")
 
 
+def frames_between(video_path: Path, first: int, stop: int) -> Iterator[Frame]:
+    """第 first 到 stop-1 帧逐帧读（先跳到 first，不从头 grab）。"""
+    capture = cv2.VideoCapture(str(video_path))
+    fps = float(capture.get(cv2.CAP_PROP_FPS) or 0) or 10.0
+    try:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, first)
+        for index in range(first, stop):
+            ok, bgr = capture.read()
+            if not ok:
+                break
+            yield Frame(index, index / fps, cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+
+
 def inverted(frame: Frame) -> Frame:
     """黑底白字的谱面反转成白底黑字，后面的检测、去色、排版都按浅底深字来。
 

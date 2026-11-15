@@ -133,6 +133,7 @@ def read_staff_rhythm(
     heads = _drop_beam_heads(ink, heads, stems, spacing)
     heads = _check_whole_heads(ink, heads, stems, lines, spacing)
     heads = sorted(heads + _hollow_heads_on_stems(ink, stems, heads, lines, spacing, thick))
+    heads = [head for head in heads if _ledgered(ink, head, lines, spacing)]
     for head in heads:
         event = _head_event(no_lines, ink, head, stems, spacing, used, solid, middle=lines[2])
         if event is None:
@@ -275,6 +276,19 @@ def _noteheads(ink: np.ndarray, spacing: float, left_bar: int, right_bar: int) -
             continue
         heads.append((cx, cy, True))
     return sorted(heads)
+
+
+def _ledgered(ink: np.ndarray, head: tuple[float, float, bool], lines: list[float], spacing: float) -> bool:
+    """离开五线谱一个线距左右以上的符头，和谱之间一定有加线（第一条加线在最外那条谱线外一个线距）。
+    没有加线的是谱外的别的东西：速度记号 "♩ = 156" 里的音符、文字。"""
+    hx, hy, _hollow = head
+    if lines[0] - 0.75 * spacing <= hy <= lines[-1] + 0.75 * spacing:
+        return True
+    row = lines[0] - spacing if hy < lines[0] else lines[-1] + spacing
+    reach = max(1, int(round(0.15 * spacing)))
+    band = ink[max(0, int(round(row)) - reach) : int(round(row)) + reach + 1, max(0, int(hx - 1.2 * spacing)) : int(hx + 1.2 * spacing) + 1]
+    # 加线比符头还宽一点：一行里连着的墨有一个线距以上。
+    return any(_longest_true_run(line) >= spacing for line in band.astype(bool))
 
 
 def _drop_beam_heads(

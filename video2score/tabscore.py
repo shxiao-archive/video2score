@@ -1167,12 +1167,13 @@ def _settle_meters(measures: list[ScoreMeasure]) -> None:
 
     谱上印了拍号（GP 每次换拍号都印）就只在印拍号的小节换；印了但没读出来，用这一小节的时值总和。
     第一个读出来的拍号之前（谱头的拍号常挤在谱号、调号后面没读到），以及一个都没读到时：
-    时值总和是规整拍号就用它，否则沿用最常见的拍号。
+    时值总和是规整拍号就用它，否则沿用最常见的拍号。只有休止的小节是整小节休止，不拿它的时值定拍号。
     """
     first = next((index for index, measure in enumerate(measures) if measure.signature), len(measures))
-    sums = [measure.meter for measure in measures[:first] if measure.meter in _METERS and measure.notes]
+    sounding = [any(not note.rest for note in measure.notes) for measure in measures]
+    sums = [measure.meter for measure, heard in zip(measures[:first], sounding) if measure.meter in _METERS and heard]
     if not sums:
-        sums = [measure.meter for measure in measures if measure.meter in _METERS and measure.notes]
+        sums = [measure.meter for measure, heard in zip(measures, sounding) if measure.meter in _METERS and heard]
     common = Counter(sums).most_common(1)[0][0] if sums else Fraction(1)
     current = common
     for index, measure in enumerate(measures):
@@ -1189,7 +1190,7 @@ def _settle_meters(measures: list[ScoreMeasure]) -> None:
             current = measure.signature
         elif measure.new_meter and total in _METERS:
             current = total
-        elif index < first and total in _METERS and (total == current or total == following or total == common):
+        elif index < first and sounding[index] and total in _METERS and (total == current or total == following or total == common):
             current = total
         measure.meter = current
         if measure.notes and total > current:

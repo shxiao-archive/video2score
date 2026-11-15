@@ -488,6 +488,7 @@ def _absorb(
         if index + 1 < len(slots):
             neighbours.append(slots[index + 1])
         # 号对得上还不够，长相也要对得上：误读的号（102 读成 101）会把真小节并掉。
+        # 同一帧里两个都看到过，就是两个小节（长得一样的整小节休止，号又被水印盖住时只能靠这个分）。
         target = next(
             (
                 item
@@ -495,6 +496,7 @@ def _absorb(
                 if item.number is not None
                 and any(_same_or_extra(number, item.number) for number in heard)
                 and loosely_same(item.latest, slot.latest)
+                and not _together(item, slot)
             ),
             None,
         )
@@ -508,12 +510,17 @@ def _absorb(
         if (
             heard
             and all(number in owners for number in heard)
-            and any(loosely_same(owners[number].latest, slot.latest) for number in heard)
+            and any(loosely_same(owners[number].latest, slot.latest) and not _together(owners[number], slot) for number in heard)
         ):
             absorbed += 1
             continue
         result.append(slot)
     return result, absorbed
+
+
+def _together(a: Slot, b: Slot) -> bool:
+    """两个槽位在同一帧里都有观测：追踪时每帧的每个小节只归一个槽位，所以它们是两个小节。"""
+    return not {item.frame for item in a.observations}.isdisjoint(item.frame for item in b.observations)
 
 
 def _same_or_extra(read: int, number: int) -> bool:
@@ -537,6 +544,8 @@ def _reorder(slots: list[Slot]) -> tuple[list[Slot], int, int]:
     keep = set(_longest_increasing([slots[index].number for index in numbered]))
     spine = {numbered[position] for position in keep}
     taken = {slots[index].number for index in spine}
+    # 每个号现在在哪个槽位上（下标）。收重的一份要挪到它旁边。
+    holder = {slots[index].number: index for index in spine}
     # 骨架上的合并休止占着它到下一个骨架号之间的所有号：落在这里面的号是误读（112 截成 12）。
     covered: list[tuple[int, int]] = []
     ordered_spine = sorted(spine)
@@ -545,6 +554,9 @@ def _reorder(slots: list[Slot]) -> tuple[list[Slot], int, int]:
             covered.append((slots[index].number, slots[following].number))
     spine_times = sorted((slots[index].number, slots[index].first_seconds) for index in spine)
     blocks: list[tuple[float, list[Slot]]] = []
+    # 骨架上每个号所在的块，和原来排在它前面的收重的几份（各连着跟在后面的无号槽位）。
+    holder_block: dict[int, list[Slot]] = {}
+    early: dict[int, list[list[Slot]]] = {}
     moved = misread = 0
     for index, slot in enumerate(slots):
         number = slot.number
@@ -555,7 +567,8 @@ def _reorder(slots: list[Slot]) -> tuple[list[Slot], int, int]:
                 blocks.append((float("-inf"), [slot]))
             continue
         if index in spine:
-            blocks.append((float(number), [slot]))
+            holder_block[number] = [slot]
+            blocks.append((float(number), holder_block[number]))
             continue
         inside_rest = any(start < number < end for start, end in covered)
         # 一个小节不会比它后面的小节晚出现很久（谱是先露出来再播到）：晚得多的是截断的号（21 只剩 1）。
@@ -567,11 +580,14 @@ def _reorder(slots: list[Slot]) -> tuple[list[Slot], int, int]:
         if number not in taken and slot.number_score >= CONFIDENT and not inside_rest and not too_late:
             blocks.append((float(number), [slot]))
             taken.add(number)
+            holder[number] = index
             moved += 1
             continue
         if number in taken and slot.number_score >= _SURE_MERGE and not too_late:
             # 号已经有了、这一份又读得很准：是追踪收重的一份，挪到同号的旁边等合并。
             blocks.append((number + 0.5, [slot]))
+            if index < holder[number]:
+                early.setdefault(number, []).append(blocks[-1][1])
             moved += 1
             continue
         slot.number = None
@@ -581,6 +597,12 @@ def _reorder(slots: list[Slot]) -> tuple[list[Slot], int, int]:
             blocks[-1][1].append(slot)
         else:
             blocks.append((float("-inf"), [slot]))
+    # 原来在同号那一份前面收重的，紧接在它后面、它带着的无号槽位前面：合并时留的是同号那一份的观测，
+    # 跟在它后面的无号槽位（下一小节没印号）也不会被挤到这几份前头。
+    for number, groups in early.items():
+        holder_block[number][1:1] = [slot for members in groups for slot in members]
+        for members in groups:
+            members.clear()
     blocks.sort(key=lambda block: block[0])
     return [slot for _key, members in blocks for slot in members], moved, misread
 
