@@ -235,7 +235,7 @@ async function startConvert(event) {
       label = chosenFile.name;
     }
     if (!source) throw new Error("请粘贴视频链接，或拖入一个视频文件或 PDF 谱。");
-    await api("convert", { json: { source, label, exports, link: chosenFile ? $("#link").value.trim() : null } });
+    await api("convert", { json: { source, label, exports, instrument: document.querySelector('input[name="instrument"]:checked').value, link: chosenFile ? $("#link").value.trim() : null } });
     $("#source").value = "";
     $("#link").value = "";
     chooseFile(null);

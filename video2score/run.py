@@ -22,7 +22,7 @@ from video2score.header import Header, content_start, erase_label_after_header, 
 from video2score.tidy import geometry, has_multirest
 from video2score.jobs import Cancelled, MANIFEST_VERSION, check_formats, load_manifest, new_job_dir, relative_to_job, save_manifest
 from video2score.layout import layout_rows, paginate, write_pdf
-from video2score.measures import PAD_ABOVE, FrameMeasures, MeasureFinder
+from video2score.measures import PAD_ABOVE, FrameMeasures, MeasureFinder, join_turn
 from video2score.paths import UPLOADS_DIR
 from video2score.order import arrange, gaps, rescue
 from video2score.tabscore import ScoreMeasure, estimate_tempo, read_job, score_marks, write_musicxml
@@ -48,6 +48,8 @@ class Options:
     exports: tuple[str, ...] = ()
     # 本地视频的原视频链接：用来查曲名、原唱，页脚印上出处。
     link: str | None = None
+    # 乐器："bass" 或 "guitar"（用户选的）。None 是没选：按 TAB 线数猜，6 弦贝斯会被当成吉他。
+    instrument: str | None = None
 
 
 def run(
@@ -58,6 +60,8 @@ def run(
 ) -> Path:
     options = options or Options()
     check_formats(options.exports)
+    if options.instrument not in (None, "bass", "guitar"):
+        raise ValueError(f"乐器只能是 bass 或 guitar：{options.instrument}")
     say = progress or (lambda _text: None)
     kind, ref = classify_source(source)
     job_dir = new_job_dir()
@@ -68,6 +72,8 @@ def run(
         "pid": os.getpid(),
         "artifacts": {},
     }
+    if options.instrument:
+        manifest["instrument"] = options.instrument
     # 一开始就写下来：进程半路被杀，界面上还能看见这个作业。
     save_manifest(job_dir, manifest, strict=False)
     try:
@@ -112,6 +118,33 @@ def _rescan_tail(tracker: Tracker, found: Iterable[FrameMeasures]) -> list[Slot]
     return [slot for slot in ordered_slots(trial) if slot.id in following and slot.id not in known]
 
 
+def page_turned(before: FrameMeasures, after: FrameMeasures) -> bool:
+    """两帧的小节大半对不上：画面挪过了（翻页、滚动）。光标挡住一道小节线不算。
+
+    按整个小节（左右两道线都在原位）比，不按单道线：滚动后碰巧有一两道线落回原来的横坐标很常见。"""
+    tolerance = max(3.0, 0.3 * after.spacing)
+    kept = sum(
+        1
+        for measure in after.measures
+        if any(abs(measure.left - old.left) <= tolerance and abs(measure.right - old.right) <= tolerance for old in before.measures)
+    )
+    return kept < 0.5 * len(after.measures)
+
+
+def _last_bar(found: FrameMeasures) -> int:
+    return max(measure.right for measure in found.measures)
+
+
+def moved(before: FrameMeasures, after: FrameMeasures) -> bool:
+    """两帧挨着的帧之间谱面挪了：后一帧的小节线大半不在前一帧的小节线上。
+    谱带淡出时小节线只会消失、不会挪，留下的都还在原处。只看位置不看长相：快速滚动时一帧就挪近一个小节宽，长相对不准。"""
+    tolerance = max(3.0, 0.3 * after.spacing)
+    old = [x for measure in before.measures for x in (measure.left, measure.right)]
+    new = {x for measure in after.measures for x in (measure.left, measure.right)}
+    stayed = sum(1 for x in new if any(abs(x - y) <= tolerance for y in old))
+    return stayed < 0.5 * len(new)
+
+
 def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, options: Options, say: Callable[[str], None]) -> None:
     say("取视频……")
     video = fetch_video(source, kind, job_dir / "download", say)
@@ -129,16 +162,68 @@ def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, 
     say("逐帧找小节……")
     # closing：半路取消时马上关掉视频文件，不然 Windows 上删不掉作业目录。
     with contextlib.closing(iter_frames(video, sample_every=options.sample_every, start_sec=options.start_sec, end_sec=options.end_sec)) as frames:
+        previous: FrameMeasures | None = None
+        still = False  # 上两次采样之间画面没动
+        turning = False  # 正在逐帧补看一次翻页（翻页滚动可能跨好几个采样间隔，一直补看到画面停下）
+        # 翻页途中的帧（补看的帧标 True）：停稳在新的一页上才收。片尾动画谱面散开、飞走时也像翻页，
+        # 但停不下来、谱面就没了，那时补看的帧扔掉，不然残影会攒够次数变成小节。
+        pending: list[tuple[FrameMeasures, bool]] = []
+        # 翻页前停稳的最后一帧；翻页停稳后拿它和新一页拼被画面边缘截断的那一小节（measures.join_turn）。
+        before_turn: FrameMeasures | None = None
+        # 这一页停稳的帧里小节线收到最右边的那帧：光标正压在小节线上的那帧，那条线会被当成光标去掉。
+        steady: FrameMeasures | None = None
+        joined: list[Slot] = []
         for frame in frames:
             sampled += 1
             found = finder(frame)
+            settled = found is not None
+            if found is not None and previous is not None:
+                jumped = page_turned(previous, found)
+                if jumped and still and not turning:
+                    before_turn = steady or previous
+                turning = jumped and (still or turning)
+                if turning:
+                    # 整屏翻页时翻页前最右边那一小节只露半截，翻页后又出了画面，只有滚动中途的几帧整格露出来：逐帧补看。
+                    with contextlib.closing(frames_between(video, previous.frame.index + 1, frame.index)) as between:
+                        middles = [seen for middle in between if (seen := finder(middle)) is not None]
+                    # 只有补看的帧里谱面确实在挪才算翻页滚动：谱带淡出时小节线一条条消失，也会大半对不上，
+                    # 那时逐帧补看只会把残影攒成小节（拆开结尾的合并休止）。
+                    chain = [previous, *middles, found]
+                    turning = any(moved(a, b) for a, b in zip(chain, chain[1:]))
+                    pending.extend((seen, True) for seen in (middles if turning else []))
+                settled = not jumped
+                if not jumped and still and found.measures and (steady is None or page_turned(steady, found) or _last_bar(found) >= _last_bar(steady)):
+                    steady = found
+                elif jumped:
+                    steady = None
+                still = not jumped
+            if found is not None and turning:
+                pending.append((found, False))
+            else:
+                for seen, glimpse in pending:
+                    if settled or not glimpse:
+                        tracker.add(seen, glimpse=glimpse)
+                if pending and settled and found is not None and before_turn is not None:
+                    piece = join_turn(before_turn, found, finder)
+                    if piece is not None:
+                        joined.append(Slot(-1 - len(joined), [piece], seen=1, first_seconds=piece.seconds))
+                before_turn = None
+                pending = []
+                if found is not None:
+                    tracker.add(found)
             if found is not None:
-                tracker.add(found)
+                previous = found
                 last_seen, gone = frame.index, None
-            elif last_seen is not None and gone is None:
-                gone = frame.index
+            else:
+                # 谱面没了（转场、黑屏）：“停着”“正在翻页”都作废，不然谱面回来时整段空白会被当成翻页逐帧补看。
+                still = turning = False
+                if last_seen is not None and gone is None:
+                    gone = frame.index
             if sampled % 100 == 0 and frame_count:
                 say(f"  {frame.index / frame_count:.0%}  已收 {len(tracker.slots)} 个小节")
+        for seen, glimpse in pending:
+            if not glimpse:
+                tracker.add(seen)
     late: list[Slot] = []
     if last_seen is not None and gone is not None:
         # 视频常在最后一小节刚整格露出来时就切走，两个采样帧之间那几帧才看得到它：这一段逐帧补看。
@@ -159,7 +244,7 @@ def _run_video(job_dir: Path, manifest: dict[str, Any], source: str, kind: str, 
     slots, numbering = arrange(slots)
     # 号断了档的地方，到只出现过一两帧的碎片里找回来。
     late_ids = {slot.id for slot in late}
-    slots, rescued = rescue(slots, [slot for slot in fragments(tracker) if slot.id not in late_ids])
+    slots, rescued = rescue(slots, [slot for slot in fragments(tracker) if slot.id not in late_ids] + joined)
     manifest["numbers"] = {
         "read": numbering.read,
         "total": numbering.total,

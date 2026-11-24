@@ -163,7 +163,9 @@ def _band_box(
     spacing = cluster[0][2]
     top_pad = max(8, int(round(spacing * 2.0)))
     extra = max(top_pad, int(round(spacing * 7.0)))
-    bottom_pad = max(8, int(round(cluster[-1][2] * 1.15)))
+    # 只有一行谱（纯 TAB）时符干、符杠、符尾都挂在谱下面，最远到 TAB 下 3.5 个线距左右。
+    below = 4.0 if len(cluster) == 1 else 1.15
+    bottom_pad = max(8, int(round(cluster[-1][2] * below)))
     y0 = max(0, int(top - top_pad))
     limit = max(0, int(top - extra))
     while y0 > limit and float(np.median(gray[y0 - 1])) >= 190:

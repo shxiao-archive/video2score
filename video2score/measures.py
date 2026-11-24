@@ -26,6 +26,8 @@ HEAD_LABEL_RIGHT = 4.5
 _PAGE_COVER = 0.2
 # 签名图的线距。要能分出 TAB 上的 3 和 5、符头差半个线距；再细就会被压缩噪点拖累。
 _SIGNATURE_SPACING = 8.0
+# 翻页前后两截的重叠里，字对不上的比例在这以内才拼（和 same_measure 同一个口径）。
+_JOIN_DISTANCE = 0.16
 
 
 @dataclass
@@ -168,6 +170,66 @@ class MeasureFinder:
     @property
     def polarity(self) -> str:
         return "dark" if self.found[True] > self.found[False] else "light"
+
+
+def join_turn(before: FrameMeasures, after: FrameMeasures, finder: MeasureFinder) -> Measure | None:
+    """整屏翻页时被画面右边截断的那一小节，拼回整格。
+
+    翻页前它只露出左半（有左线和号），翻页后只露出右半（左线在画面外），两截都不算完整小节。
+    有的视频翻页后从截断处或更早接着显示，两截有一段重叠：在重叠里找出两页差多少，把两帧左右接成一张宽图，
+    照常切小节，跨过接缝的那一格就是它。找不到重叠（翻页后真的少了一截）就不拼。
+    """
+    if finder.scale != 1.0 or finder.page or any(value is not None for value in finder.ratios):
+        # shortcut: 放大、整页视图、手动框谱面时不拼（框和坐标要另算），遇到这样翻页的视频再补。
+        return None
+    if len(before.rows) != 1 or len(after.rows) != 1 or not before.measures or not after.measures:
+        return None
+    spacing = before.spacing
+    if abs(after.spacing - spacing) > 0.06 * spacing or abs(after.rows[0] - before.rows[0]) > 0.3 * spacing:
+        return None
+    last = max(measure.right for measure in before.measures)
+    first = min(measure.left for measure in after.measures)
+    end, start = before.box[2], after.box[0]
+    need = int(round(2.0 * spacing))
+    if end - last < need or first - start < need:
+        return None
+    # 只比谱线那几行：上面的小节号、下面的符干在两页里露出的多少不一样。
+    top = before.measures[0].top
+    y0 = max(0, int(round(top - 0.5 * spacing)))
+    y1 = int(round(top + before.measures[0].lines[-1] + 0.5 * spacing))
+    a, b = _glyph_mask(before.frame.rgb[y0:y1], spacing), _glyph_mask(after.frame.rgb[y0:y1], spacing)
+    found_shift = None
+    # 翻页后的左沿落在截断那一格里（last 到 end 之间），那一格的右线在翻页前的画面外。
+    # 从重叠最长的试起，取第一个对得上的：一拍一个同样的和弦时，错开一拍也对得上，翻页后多半从那一格开头附近接着显示。
+    for shift in range(last - start + 1, end - start - need + 1):
+        if first + shift <= end:
+            continue
+        left = start + shift
+        pa, pb = a[:, left:end], b[:, left - shift : end - shift]
+        if pa.sum() + pb.sum() < 0.5 * spacing * spacing:  # 重叠里至少有一两个字
+            continue
+        if signature_distance(pa, pb) <= _JOIN_DISTANCE:
+            found_shift = shift
+            break
+    if found_shift is None:
+        return None
+    shift = found_shift
+    seam = (start + shift + end) // 2
+    rgb = np.concatenate([before.frame.rgb[:, :seam], after.frame.rgb[:, seam - shift :]], axis=1)
+    found = frame_measures(Frame(before.frame.index, before.frame.seconds, rgb))
+    tolerance = max(3.0, 0.3 * spacing)
+    for measure in found.measures if found is not None else []:
+        if abs(measure.left - last) <= tolerance and abs(measure.right - (first + shift)) <= tolerance:
+            return measure
+    return None
+
+
+def _glyph_mask(rgb: np.ndarray, spacing: float) -> np.ndarray:
+    """谱带上的字（布尔图），去掉比一个线距长的横线：谱线处处一样，比位移时只会帮倒忙；
+    背景插画让谱线时深时浅，不能按整行去。"""
+    ink = (darkness_map(rgb) > 128).astype(np.uint8)
+    lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((1, int(round(spacing))), np.uint8))
+    return (ink > 0) & (lines == 0)
 
 
 def _band_edges(gray: np.ndarray, system: System, upper: float, lower: float) -> tuple[float, float]:

@@ -50,6 +50,7 @@ class GpNote:
     staccato: bool = False
     accent: bool = False  # 重音 ">"
     heavy_accent: bool = False  # 重音 "^"
+    palm: bool = False  # 闷音 P.M.
 
 
 @dataclass
@@ -166,6 +167,7 @@ def _add_note(bar: GpBar, element: ET.Element, divisions: int) -> None:
     note.tie_origin = any(tie.get("type") == "start" for tie in element.findall("tie"))
     note.tie_destination = any(tie.get("type") == "stop" for tie in element.findall("tie"))
     note.dead = element.findtext("notehead") == "x"
+    note.palm = element.findtext("play/mute") == "palm"
     notations = element.find("notations")
     if notations is not None:
         slide_start = any(item.get("type") == "start" for item in notations.findall("slide"))
@@ -359,6 +361,8 @@ def _note_gpif(index: int, note: GpNote, tuning: list[int], key: int) -> str:
     parts.append(f'<Property name="Midi"><Number>{midi}</Number></Property>')
     if note.dead:
         parts.append('<Property name="Muted"><Enable /></Property>')
+    if note.palm:
+        parts.append('<Property name="PalmMuted"><Enable /></Property>')
     if note.slide:
         parts.append(f'<Property name="Slide"><Flags>{note.slide}</Flags></Property>')
     # GPIF 的弦从最低的那根数起（0 是最粗的弦）。
@@ -542,6 +546,7 @@ def _gp5_note(gp, beat, note: GpNote, grace: GpBeat | None):
     effect.staccato = note.staccato
     effect.accentuatedNote = note.accent
     effect.heavyAccentuatedNote = note.heavy_accent
+    effect.palmMute = note.palm
     slides = []
     for flag, kind in (
         (SHIFT_SLIDE, gp.SlideType.shiftSlideTo),

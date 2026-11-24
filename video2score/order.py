@@ -116,12 +116,16 @@ def rescue(slots: list[Slot], fragments: list[Slot]) -> tuple[list[Slot], int]:
     found: dict[int, list[Slot]] = {}
     # 结尾接着往下编的号本身就是旁证，门槛低一些（见过读出 0.6997 的）。
     trailing: dict[int, list[Slot]] = {}
+    unread: list[Slot] = []
     for fragment in fragments:
         number, score = _vote([read_measure(item, bank) for item in fragment.observations])
         if number is not None and score >= CONFIDENT:
             found.setdefault(number, []).append(fragment)
         if number is not None and score >= 0.6:
             trailing.setdefault(number, []).append(fragment)
+        # 读得没把握（0.6～0.7）的也算没读出号：不然两头都不收，夹在断档里的那一格补不进去。
+        if number is None or score < CONFIDENT:
+            unread.append(fragment)
     result: list[Slot] = []
     added = 0
     for index, slot in enumerate(slots):
@@ -136,13 +140,21 @@ def rescue(slots: list[Slot], fragments: list[Slot]) -> tuple[list[Slot], int]:
         end = max(item.seconds for item in following.observations) + 5.0
         for number in range(first + 1, last):
             candidates = [fragment for fragment in found.get(number, []) if start <= fragment.first_seconds <= end]
+            if not candidates and last - first == 2:
+                # 整屏翻页时缺的那一小节常只在滚动中途整格露出一帧，号又被光标压住读不出来。
+                # 只缺一个号、又正好夹在前一格最后一次出现和后一格第一次出现之间的无号碎片，就是它。
+                after, before = slot.latest.seconds - 0.1, following.first_seconds + 0.1
+                between = [
+                    fragment
+                    for fragment in unread
+                    if after <= fragment.first_seconds <= before and fragment not in result
+                ]
+                candidates = sorted(between, key=lambda fragment: -fragment.latest.width)[:1]
             if not candidates:
                 continue
             merged = candidates[0]
             for other in candidates[1:]:
-                merged.seen += other.seen
-                room = MAX_OBSERVATIONS - len(merged.observations)
-                merged.observations.extend(other.observations[: max(0, room)])
+                merged.absorb(other)
             merged.number, merged.number_score = number, CONFIDENT
             result.append(merged)
             added += 1
@@ -263,7 +275,8 @@ def _split(slots: list[Slot], readings: dict[int, list[Reading | None]]) -> tupl
                 continue
             owner = owners.get(item.number)
             if owner is not None and owner is not slot:
-                if len(owner.observations) < MAX_OBSERVATIONS:
+                # 拖影画面不给有停稳画面的格子（见 Slot.absorb）。
+                if len(owner.observations) < MAX_OBSERVATIONS and (owner.glimpsed or not slot.glimpsed):
                     owner.observations.append(measure)
                 continue
             extra.setdefault(item.number, []).append((measure, item))
@@ -349,10 +362,8 @@ def _leading_surplus(slots: list[Slot], first: int) -> list[int]:
     for index in dropped:
         slot = slots[index]
         if loosely_same(head.latest, slot.latest):
-            head.seen += slot.seen
+            head.absorb(slot)
             head.first_seconds = min(head.first_seconds, slot.first_seconds)
-            room = MAX_OBSERVATIONS - len(head.observations)
-            head.observations.extend(slot.observations[: max(0, room)])
     return dropped
 
 
@@ -447,9 +458,7 @@ def _merge(slots: list[Slot]) -> tuple[list[Slot], int, int]:
         # 号是唯一的。挨得近、号又读得很准，长相对不上（音符动画、背景）也是同一个小节。
         sure = min(earlier.number_score, slot.number_score) >= _SURE_MERGE
         if near and ((confident and loosely_same(earlier.latest, slot.latest)) or sure):
-            earlier.seen += slot.seen
-            room = MAX_OBSERVATIONS - len(earlier.observations)
-            earlier.observations.extend(slot.observations[: max(0, room)])
+            earlier.absorb(slot)
             earlier.number_score = max(earlier.number_score, slot.number_score)
             merged += 1
             continue
@@ -501,9 +510,7 @@ def _absorb(
             None,
         )
         if target is not None:
-            target.seen += slot.seen
-            room = MAX_OBSERVATIONS - len(target.observations)
-            target.observations.extend(slot.observations[: max(0, room)])
+            target.absorb(slot)
             absorbed += 1
             continue
         # 读到的号全都已有别的槽位、长相也和其中之一对得上：这是追踪时把几个小节的观测混在一起的多余槽位。

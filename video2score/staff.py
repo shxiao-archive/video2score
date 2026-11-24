@@ -165,6 +165,7 @@ def find_systems(rgb: np.ndarray, cover: float = 0.40) -> list[System]:
     partial = [staff_bars(staff, 0.6) for staff in staves]
     width = gray.shape[1]
     systems: list[System] = []
+    thin_columns: np.ndarray | None = None
     for members in _system_groups(staves, bars):
         chosen = [staves[index] for index in members]
         tab = [index for index in members if staves[index].kind == "tab"]
@@ -206,9 +207,30 @@ def find_systems(rgb: np.ndarray, cover: float = 0.40) -> list[System]:
                     continue
                 found.append(x)
             found.sort()
+        if found:
+            # 播放光标从上到下贯穿整条谱带，小节线只画在谱线之间：最上面一条线往上、最下面一条线往下都还连着的是光标。
+            thin_columns = _thin_dark(gray.T).T if thin_columns is None else thin_columns
+            found = [x for x in found if not _through_band(thin_columns, chosen, x)]
         system = System(staves=tuple(chosen), bars=tuple(found))
         systems.append(_with_line_ends(system, width))
     return systems
+
+
+def _through_band(thin: np.ndarray, staves: list[Staff], x: int) -> bool:
+    """x 处的竖线伸出谱线组上下各两个线距（上面是小节号那一带，下面是符干那一带）。伸到画面外的不下结论。"""
+    first = min(staves, key=lambda staff: staff.top)
+    last = max(staves, key=lambda staff: staff.bottom)
+    spans = (
+        (first.top - 2.5 * first.spacing, first.top - 0.5 * first.spacing),
+        (last.bottom + 0.5 * last.spacing, last.bottom + 2.5 * last.spacing),
+    )
+    for low, high in spans:
+        y0, y1 = int(round(low)), int(round(high))
+        if y0 < 0 or y1 > thin.shape[0]:
+            return False
+        if float(thin[y0:y1, max(0, x - 2) : x + 3].any(axis=1).mean()) < 0.8:
+            return False
+    return True
 
 
 def _dashed_bars(gray: np.ndarray, staff: Staff) -> list[int]:

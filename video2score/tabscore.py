@@ -19,7 +19,22 @@ import numpy as np
 from video2score.images import read_gray
 from video2score.header import key_signature
 from video2score.rhythm import BASE, Event, fermatas, read_staff_rhythm, staff5, stem_event, whole_event
-from video2score.tab import Bank, FretNote, Onset, adapted_tab_bank, bass_attacks, bends, fill_frets, mark_arcs, onsets, read_frets, tab_staff, vibratos, vote_frets
+from video2score.tab import (
+    Bank,
+    FretNote,
+    Onset,
+    adapted_tab_bank,
+    bass_attacks,
+    bends,
+    fill_frets,
+    mark_arcs,
+    onsets,
+    read_frets,
+    staccato_dots,
+    tab_staff,
+    vibratos,
+    vote_frets,
+)
 from video2score.tabrhythm import multirest_digits, read_multirest, read_tab_rhythm, time_signature
 from video2score.tidy import geometry, has_multirest
 
@@ -30,6 +45,8 @@ TUNINGS = {
     6: (64, 59, 55, 50, 45, 40),  # 吉他 E B G D A E
     7: (64, 59, 55, 50, 45, 40, 35),
 }
+# 六弦贝斯 C G D A E B：和六弦吉他一样是 6 条线，只能靠用户选的乐器分开。
+BASS_6 = (48, 43, 38, 33, 28, 23)
 # 一个四分音符分成 480 份：三连音、五连音、六十四分音符都能用整数表示。
 DIVISIONS = 480
 _STEPS = ("C", "C", "D", "D", "E", "F", "F", "G", "G", "A", "A", "B")
@@ -99,6 +116,24 @@ class Marks:
     tempo: int | None = None
     # 速度是按视频时间估出来的（画面里没印速度）。
     tempo_estimated: bool = False
+    # 用户选的乐器：True 贝斯、False 吉他、None 没选（按调弦猜）。
+    bass: bool | None = None
+
+
+def standard_tuning(strings: int, bass: bool | None = None) -> tuple[int, ...] | None:
+    """标准调弦。没选乐器时按线数：4、5 条是贝斯，6、7 条是吉他。"""
+    if bass and strings == 6:
+        return BASS_6
+    return TUNINGS.get(strings)
+
+
+def job_bass(job_dir: Path) -> bool | None:
+    """作业 manifest 里记的乐器（run --instrument、界面上选的）。旧作业没记，返回 None。"""
+    path = job_dir / "manifest.json"
+    if not path.is_file():
+        return None
+    instrument = json.loads(path.read_text(encoding="utf-8")).get("instrument")
+    return {"bass": True, "guitar": False}.get(instrument)
 
 
 def score_marks(job_dir: Path) -> Marks:
@@ -111,12 +146,12 @@ def score_marks(job_dir: Path) -> Marks:
     if not library:
         return Marks()
     first = library[0]
-    marks = Marks()
+    marks = Marks(bass=job_bass(job_dir))
     tab = tab_staff(first)
     prefix_path = job_dir / "measures" / "prefix.png"
     if tab is not None and prefix_path.is_file():
         prefix = read_gray(prefix_path)
-        standard = TUNINGS.get(len(tab.lines))
+        standard = standard_tuning(len(tab.lines), marks.bass)
         if prefix is not None and standard is not None:
             marks.tuning = read_tuning(prefix, list(tab.lines), standard)
     heads = []
@@ -159,13 +194,17 @@ def read_job(job_dir: Path, progress: Callable[[str], None] | None = None) -> li
     library = [record for record, *_rest in loaded]
     starts = _content_starts(loaded)
     thick = _upscaled(job_dir)
-    opening = _opening_key(loaded)
+    bass = job_bass(job_dir)
+    if bass is None:
+        # 没选乐器：6 条线以上的 TAB 当吉他（高音谱号），否则贝斯（低音谱号）。
+        bass = next((len(tab.lines) < 6 for _record, _images, tab, _staff, _clean in loaded if tab), True)
+    opening = _opening_key(loaded, bass)
     bank = adapted_tab_bank([(images[0], tab, tuple(record["bars"])) for record, images, tab, _staff, _clean in loaded if tab])
     candidates = []
     for index, ((record, images, tab, staff, clean), start) in enumerate(zip(loaded, starts)):
         if index % 10 == 0:
             say(f"读 TAB 和节奏 {index}/{len(loaded)}……")
-        candidates.append(_read_measure(record, images, tab, staff, bank, clean, start, thick, opening))
+        candidates.append(_read_measure(record, images, tab, staff, bank, clean, start, thick, opening, bass))
     measures = _choose(candidates)
     for measure, record in zip(measures, library):
         measure.seconds, measure.seen = record.get("first_seconds"), int(record.get("seen") or 0)
@@ -289,13 +328,13 @@ def _drop_held_tail(measures: list[ScoreMeasure], least: int = 3) -> list[ScoreM
     return measures[:end]
 
 
-def _opening_key(loaded: list[tuple]) -> int | None:
+def _opening_key(loaded: list[tuple], bass: bool = True) -> int | None:
     """第一个有五线谱的小节开头印的调号（升号数为正、降号数为负）。"""
     for record, images, _tab, staff, clean in loaded:
         if staff is None or not images:
             continue
         image = clean if clean is not None else images[0]
-        found = key_signature(image, list(staff.lines), staff.spacing, record["bars"][0], record["bars"][-1])
+        found = key_signature(image, list(staff.lines), staff.spacing, record["bars"][0], record["bars"][-1], bass)
         return found[0] if found is not None else None
     return None
 
@@ -319,6 +358,7 @@ def _read_measure(
     start: int | None = None,
     thick: bool = False,
     opening: int | None = None,
+    bass: bool = True,
 ) -> list[tuple[int, ScoreMeasure]]:
     """一小节几帧各读一遍，返回不同的读法和各自的票数（参考帧的读法排在最前）。
 
@@ -344,12 +384,23 @@ def _read_measure(
     if staff is None:
         # 纯 TAB（Guitar Pro 那种）：节奏记号画在 TAB 下面。
         results = [read_tab_rhythm(frame, tab, bars, groups) for frame in images]
+        # TAB 上方的记号（揉弦、推弦、拍勾弦字母、跳音点）和五线谱 + TAB 时一样按帧投票，清洗图也算一帧。
+        frames = images + ([clean] if clean is not None and clean.shape == image.shape else [])
+        trusted = len(frames) > len(images)
+        letters = [bass_attacks(frame, tab, (bars[0], bars[-1])) for frame in frames]
+        waves = [vibratos(frame, tab, (bars[0], bars[-1])) for frame in frames]
+        dots = [[(x, "staccato") for x in staccato_dots(frame, tab, (bars[0], bars[-1]))] for frame in frames]
+        arrows = _vote_bends([bends(frame, tab, bank, (bars[0], bars[-1])) for frame in frames], tab.spacing)
         out: list[tuple[int, ScoreMeasure]] = []
         for votes, found in _distinct(results, lambda result: tuple((e.duration, e.rest, bool(e.notes)) for e in result.events)):
             notes = [_score_note(event, event.notes) for event in found.events]
+            _attacks(notes, letters, tab.spacing, trusted=letters[-1] if trusted else None)
+            _attacks(notes, dots, tab.spacing, trusted=None, kinds=("staccato",))
+            _vibrato_notes(notes, waves, tab.spacing)
             total = sum((note.duration for note in notes), Fraction(0))
             measure = ScoreMeasure(number, notes, total, tab.strings, issues=list(found.issues))
             measure.signature, measure.new_meter = found.meter, found.signature_seen
+            measure.bends = [(x, amount, tab.spacing) for x, amount in arrows]
             out.append((votes, measure))
         return out
     # 五线谱开头的拍号：两个粗体数字常被当成空心符头（全音符）。读出来了才用，读不出的多半不是拍号。
@@ -370,11 +421,11 @@ def _read_measure(
         groups = [group for group in groups if not span[0] - margin <= group.x <= span[1] + margin]
     limit = (0, tab.top - 1.2 * tab.spacing)
     # 小节开头印的调号（行首、行中转调）：记下来，升降号那一段不读音。
-    key = key_signature(clean if clean is not None and clean.shape == image.shape else image, list(staff.lines), staff.spacing, bars[0], bars[-1])
+    key = key_signature(clean if clean is not None and clean.shape == image.shape else image, list(staff.lines), staff.spacing, bars[0], bars[-1], bass)
     if key is None and clean is not None and opening is not None:
         # 清洗图上没认出调号（多帧合成时升号的竖笔偶尔对不齐）：一半以上的原图认出开头那个调号，就是行首重印的调号。
         # 别的调号不这样补：小节线后面紧挨着的八分音符（竖的符干加符尾）在几帧原图里会像个降号。
-        found = [key_signature(frame, list(staff.lines), staff.spacing, bars[0], bars[-1]) for frame in images]
+        found = [key_signature(frame, list(staff.lines), staff.spacing, bars[0], bars[-1], bass) for frame in images]
         same = [item for item in found if item is not None and item[0] == opening]
         if len(same) * 2 > len(images):
             key = max(same, key=lambda item: item[1])
@@ -427,7 +478,11 @@ def _read_measure(
 
 
 def _attacks(
-    notes: list[ScoreNote], letters: list[list[tuple[float, str]]], spacing: float, trusted: list[tuple[float, str]] | None = None
+    notes: list[ScoreNote],
+    letters: list[list[tuple[float, str]]],
+    spacing: float,
+    trusted: list[tuple[float, str]] | None = None,
+    kinds: tuple[str, ...] = ("slap", "pop", "palm"),
 ) -> None:
     """拍弦、勾弦：TAB 上方正对着音的 S / P，一半以上的帧都看到才算（背景里的碎块只在一两帧里像个字母）；
     清洗图（逐像素投票合成的）上看到的直接算：原帧里 P 常和叠在下面的 "H"、弧线粘成一块认不出。
@@ -442,7 +497,7 @@ def _attacks(
         def near(frame: list[tuple[float, str]], kind: str) -> bool:
             return any(abs(lx - x) <= 0.35 * spacing and found == kind for lx, found in frame)
 
-        for kind in ("slap", "pop"):
+        for kind in kinds:
             seen = sum(near(frame, kind) for frame in letters)
             if seen * 2 > len(letters) or (trusted is not None and near(trusted, kind)):
                 note.marks.add(kind)
@@ -497,14 +552,19 @@ def _link_bends(measures: list[ScoreMeasure]) -> None:
 
 
 def _vibrato_notes(notes: list[ScoreNote], waves: list[list[tuple[float, float]]], spacing: float) -> None:
-    """揉弦：波浪线左端正对着的那个音（左右 0.8 个线距以内），一半以上的帧都看到才算。"""
+    """揉弦：波浪线左端正对着的那个音（左右 0.8 个线距以内），一半以上的帧都看到才算。
+    波浪线底下的延音（括号音，常在下一小节）也算揉弦：GP 在延音上照样写揉弦。"""
     if not waves:
         return
     for note in notes:
         if note.rest or not note.frets:
             continue
         x = note.frets[0].x
-        seen = sum(any(abs(left - x) <= 0.8 * spacing for left, _right in frame) for frame in waves)
+
+        def under(left: float, right: float) -> bool:
+            return abs(left - x) <= 0.8 * spacing or (note.tie_from_previous and left - 0.8 * spacing <= x <= right)
+
+        seen = sum(any(under(left, right) for left, right in frame) for frame in waves)
         if seen * 2 > len(waves):
             note.marks.add("vibrato")
 
@@ -788,8 +848,8 @@ def _notes_from_heads(measures: list[ScoreMeasure], marks: Marks) -> None:
         if total != measure.meter or not measure.notes:
             continue
         strings = measure.strings
-        tuning = marks.tuning if marks.tuning and len(marks.tuning) == strings else TUNINGS.get(strings, TUNINGS[4])
-        bass = min(tuning) < 36
+        tuning = marks.tuning if marks.tuning and len(marks.tuning) == strings else standard_tuning(strings, marks.bass) or TUNINGS[4]
+        bass = marks.bass if marks.bass is not None else min(tuning) < 36
         position = measures.index(measure)
         neighbours = [
             fret
@@ -1429,9 +1489,9 @@ def write_musicxml(
     """
     marks = marks or Marks()
     strings = max((measure.strings for measure in measures), default=4)
-    tuning = tuning or marks.tuning or TUNINGS.get(strings, TUNINGS[4])
+    tuning = tuning or marks.tuning or standard_tuning(strings, marks.bass) or TUNINGS[4]
     keys = _measure_keys(measures, marks.key or 0)
-    bass = min(tuning) < 36
+    bass = marks.bass if marks.bass is not None else min(tuning) < 36
     name, program = ("Electric Bass", 34) if bass else ("Electric Guitar", 28)
     out: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -1752,6 +1812,8 @@ def _note_xml(
             lines.append('        <?GP <root><vibrato type="Slight"/></root>?>')
         if fret.dead:
             lines.append("        <play><mute>straight</mute></play>")
+        elif "palm" in note.marks:
+            lines.append("        <play><mute>palm</mute></play>")
         lines.append("      </note>")
     return lines
 

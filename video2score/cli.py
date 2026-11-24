@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         debug=args.debug,
         exports=_formats(args.export),
         link=args.link,
+        instrument=args.instrument,
     )
     progress = None if args.quiet else (lambda text: print(text, file=sys.stderr, flush=True))
     try:
@@ -100,6 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--quiet", action="store_true", help="不打印进度")
     run_parser.add_argument("--export", default="", help=_EXPORT_HELP)
     run_parser.add_argument("--link", default=None, help=_LINK_HELP)
+    run_parser.add_argument("--instrument", choices=("bass", "guitar"), default=None, help="贝斯还是吉他（不给就按 TAB 线数猜，6 弦贝斯会被当成吉他）")
     tab_parser = commands.add_parser("tab", help="对已有作业重新读 TAB 和节奏，写 score.musicxml")
     tab_parser.add_argument("--job", required=True, help="作业 id 或作业目录")
     tab_parser.add_argument("--export", default="", help=_EXPORT_HELP)

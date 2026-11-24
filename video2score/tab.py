@@ -367,7 +367,7 @@ def _glyphs(region: np.ndarray, lines: list[float], spacing: float) -> list[_Gly
         if area < 2 or width > (1.6 if circle_like else 1.3) * spacing or height > 1.8 * spacing:
             continue
         pieces.append(_Glyph(x, y, x + width, y + height, labels[y : y + height, x : x + width] == index))
-    glyphs = [_open_circle(glyph, spacing, ink) for glyph in _rejoin(pieces, ink, reach, band, 1.3 * spacing)]
+    glyphs = [part for glyph in _rejoin(pieces, ink, reach, spacing, band, 1.3 * spacing) for part in _open_circle(glyph, spacing, ink)]
     glyphs = _distinct([glyph for glyph in glyphs if int(glyph.mask.sum()) >= 4])
     glyphs = [_through_line(glyph, ink, band) for glyph in glyphs]
     kept: list[_Glyph] = []
@@ -460,8 +460,8 @@ def _trim_line_stubs(glyph: _Glyph, lines: list[float], reach: int, force: bool 
     return _Glyph(glyph.x0 + left, glyph.y0 + top, glyph.x0 + right, glyph.y0 + bottom, mask[top:bottom])
 
 
-def _open_circle(glyph: _Glyph, spacing: float, ink: np.ndarray | None = None) -> _Glyph:
-    """圈起来的品位（GP 的 ⑤）：外面一圈细环，里面一个数字。只留里面的数字。
+def _open_circle(glyph: _Glyph, spacing: float, ink: np.ndarray | None = None) -> list[_Glyph]:
+    """圈起来的品位（GP 的 ⑤、⑫）：外面一圈细环，里面一个或两个数字。只留里面的数字，两位数拆成两个字。
 
     弦线常从圈里的数字中间穿过，抹线后数字缺了一截。给了 ink 时，数字框里的墨按原图取，
     穿过的那段弦线也留着，交给带横线的模板去认。
@@ -469,7 +469,7 @@ def _open_circle(glyph: _Glyph, spacing: float, ink: np.ndarray | None = None) -
     height, width = glyph.mask.shape
     # 圈比数字大，而且接近正圆。
     if not 1.1 * spacing <= height <= 1.8 * spacing or not 0.75 <= width / max(1, height) <= 1.3:
-        return glyph
+        return [glyph]
     border = max(2, int(round(0.18 * min(height, width))))
     ring = np.zeros_like(glyph.mask)
     ring[:border], ring[-border:], ring[:, :border], ring[:, -border:] = True, True, True, True
@@ -481,22 +481,35 @@ def _open_circle(glyph: _Glyph, spacing: float, ink: np.ndarray | None = None) -
         glyph.mask[:, -border:].any(axis=1).mean(),
     ]
     if min(sides) < 0.4:
-        return glyph
+        return [glyph]
     if ink is not None:
         opened = _circle_digit(glyph, ink)
         if opened is not None and opened.height >= 0.4 * height:
-            return opened
+            return _columns(opened)
     inner = glyph.mask & ~cv2.dilate(
         (glyph.mask & ring).astype(np.uint8), np.ones((3, 3), np.uint8)
     ).astype(bool)
     count, labels, stats, _centroids = cv2.connectedComponentsWithStats(inner.astype(np.uint8), connectivity=8)
     if count < 2:
-        return glyph
+        return [glyph]
     index = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     x, y, w, h, _area = (int(value) for value in stats[index])
     if h < 0.4 * height:
-        return glyph
-    return _Glyph(glyph.x0 + x, glyph.y0 + y, glyph.x0 + x + w, glyph.y0 + y + h, labels[y : y + h, x : x + w] == index)
+        return [glyph]
+    return [_Glyph(glyph.x0 + x, glyph.y0 + y, glyph.x0 + x + w, glyph.y0 + y + h, labels[y : y + h, x : x + w] == index)]
+
+
+def _columns(glyph: _Glyph) -> list[_Glyph]:
+    """按空列切开：圈里的 12 是 1 和 2 两个字，和不带圈的两位数一样一个一个认。"""
+    used = glyph.mask.any(axis=0)
+    edges = np.flatnonzero(np.diff(np.concatenate([[False], used, [False]]).astype(int)))
+    parts: list[_Glyph] = []
+    for left, right in zip(edges[::2], edges[1::2]):
+        mask = glyph.mask[:, left:right]
+        rows = np.flatnonzero(mask.any(axis=1))
+        top, bottom = int(rows[0]), int(rows[-1]) + 1
+        parts.append(_Glyph(glyph.x0 + int(left), glyph.y0 + top, glyph.x0 + int(right), glyph.y0 + bottom, mask[top:bottom]))
+    return parts
 
 
 def _circle_digit(glyph: _Glyph, ink: np.ndarray) -> _Glyph | None:
@@ -560,6 +573,7 @@ def _rejoin(
     pieces: list[_Glyph],
     ink: np.ndarray,
     reach: int,
+    spacing: float,
     band: np.ndarray,
     max_width: float | None = None,
 ) -> list[_Glyph]:
@@ -568,6 +582,8 @@ def _rejoin(
     隔着的不是弦线（比如底弦数字和它下面的符干碎块），不拼。比一个字还宽的块（圈）不拼。
     """
     line_rows = band[:, 0].astype(bool)
+    on = np.flatnonzero(line_rows)
+    centres = [float(group.mean()) for group in np.split(on, np.flatnonzero(np.diff(on) > 1) + 1)] if on.size else []
     pieces = sorted(pieces, key=lambda piece: piece.y0)
     merged = True
     while merged:
@@ -586,6 +602,11 @@ def _rejoin(
                 rows = line_rows[min(lower.y0, upper.y1) - 1 : max(lower.y0, upper.y1) + 1]
                 if not rows.any() and not 0 < gap <= max(2, reach):
                     continue
+                # 和弦里上下两根弦的字（叠着的 X、两个 10）中间也只隔两三行，但两块各自正压在一根弦上。
+                if not rows.any():
+                    up, down = _on_string(upper, centres, spacing), _on_string(lower, centres, spacing)
+                    if up is not None and down is not None and up != down:
+                        continue
                 overlap = min(upper.x1, lower.x1) - max(upper.x0, lower.x0)
                 if overlap < 0.4 * min(upper.width, lower.width):
                     continue
@@ -596,6 +617,16 @@ def _rejoin(
             if merged:
                 break
     return pieces
+
+
+def _on_string(piece: _Glyph, centres: list[float], spacing: float) -> int | None:
+    """够一个字高（约 0.6 个线距）、中心压在弦线上（约 0.3 个线距以内）的块，压的是哪根弦。
+    别的（字被切下的一截、拍号的碎块）是 None。"""
+    if piece.height < 0.6 * spacing:
+        return None
+    centre = (piece.y0 + piece.y1) / 2.0
+    near = [index for index, line in enumerate(centres) if abs(centre - line) <= 0.3 * spacing]
+    return near[0] if near else None
 
 
 def _union(upper: _Glyph, lower: _Glyph, ink: np.ndarray) -> _Glyph:
@@ -1154,35 +1185,58 @@ def adapted_tab_bank(
         ranked = sorted(scores.items(), key=lambda item: -item[1])
         margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else 1.0
         labelled.append((centroid, ranked[0][0], ranked[0][1], margin))
+    # 几乎一样的几类连成一组：同一个数字被贪心聚类分成了几类（谱面小、放大以后，同一个数字落在原图像素格上的位置不同，
+    # 糊开的样子也不同）。一组按组里最有把握的那一类定数字，别的类跟着它。单独定的话把握小的一类可能被认成别的数字（8 认成 6），
+    # 和它像的类再跟着它，会一路传错。
+    group = list(range(len(labelled)))
+    def root(index: int) -> int:
+        while group[index] != index:
+            index = group[index]
+        return index
+    for i in range(len(labelled)):
+        for j in range(i):
+            if _glyph_corr(labelled[i][0], labelled[j][0]) >= _TWIN:
+                group[root(i)] = root(j)
+    members: dict[int, list[int]] = {}
+    for index in range(len(labelled)):
+        members.setdefault(root(index), []).append(index)
     # 先定把握大的，再定把握小的。
     claimed: list[tuple[str, np.ndarray]] = []
     own: list[tuple[str, np.ndarray]] = []
-    for centroid, _label, top, margin in sorted(labelled, key=lambda item: -item[3]):
-        # 和已经定好的一类几乎一样：同一个数字被贪心聚类分成了两类（谱面小、放大以后，同一个数字落在原图像素格上的位置不同，
-        # 糊开的样子也不同），跟它定同一个数字。单独定的话把握小的这一类可能被认成别的数字（8 认成 6）。
-        twin = max(((_glyph_corr(centroid, other), label) for label, other in claimed), default=None)
-        if twin is not None and twin[0] >= _TWIN and top >= MIN_SCORE:
-            claimed.append((twin[1], centroid))
-            own.append((twin[1], centroid))
+    for indices in sorted(members.values(), key=lambda indices: -max(labelled[index][3] for index in indices)):
+        best = max(indices, key=lambda index: labelled[index][3])
+        centroid, _label, top, margin = labelled[best]
+        chosen = _claim(centroid, top, margin, claimed, bank)
+        if chosen is None:
             continue
-        scores = _digit_scores(centroid, bank)
-        for label, score in sorted(scores.items(), key=lambda item: -item[1])[:3]:
-            # 退到下一个数字只在它和最像的那个差不多、这一类字形本身又清楚时才行（MuseScore 的 9 和 0 只差 0.01）。不硬给：
-            # 压在视频画面上糊了一点的 "8" 自成一小类，8、6 都被别的类占了，会一路退成 0。
-            if score < MIN_SCORE or top - score >= _CLEAR_MARGIN:
-                break
-            if score < top and top < 0.8:
-                # 本身就认不太清的一类（背景糊过的几个字形）不往下退。
-                break
-            taken = any(
-                other_label == label and _glyph_corr(centroid, other) < 0.85 for other_label, other in claimed
-            )
-            if taken and margin < _CLEAR_MARGIN:
-                continue
-            claimed.append((label, centroid))
-            own.append((label, centroid))
-            break
+        for index in indices:
+            # 跟着组里定的数字走，只要本身认得出是个数字。
+            if index == best or labelled[index][2] >= MIN_SCORE:
+                claimed.append((chosen, labelled[index][0]))
+                own.append((chosen, labelled[index][0]))
     return tuple(own) + bank
+
+
+def _claim(
+    centroid: np.ndarray, top: float, margin: float, claimed: list[tuple[str, np.ndarray]], bank: Bank
+) -> str | None:
+    """给一类字形定数字：最像的数字被形状不同的类占了、自己又没有明显把握时，退到下一个。定不了是 None。"""
+    scores = _digit_scores(centroid, bank)
+    for label, score in sorted(scores.items(), key=lambda item: -item[1])[:3]:
+        # 退到下一个数字只在它和最像的那个差不多、这一类字形本身又清楚时才行（MuseScore 的 9 和 0 只差 0.01）。不硬给：
+        # 压在视频画面上糊了一点的 "8" 自成一小类，8、6 都被别的类占了，会一路退成 0。
+        if score < MIN_SCORE or top - score >= _CLEAR_MARGIN:
+            break
+        if score < top and top < 0.8:
+            # 本身就认不太清的一类（背景糊过的几个字形）不往下退。
+            break
+        taken = any(
+            other_label == label and _glyph_corr(centroid, other) < 0.85 for other_label, other in claimed
+        )
+        if taken and margin < _CLEAR_MARGIN:
+            continue
+        return label
+    return None
 
 
 
@@ -1195,7 +1249,11 @@ def _digit_scores(canvas: np.ndarray, bank: Bank) -> dict[str, float]:
 
 
 def _cluster(canvases: list[np.ndarray], threshold: float = 0.9) -> list[list[int]]:
-    """按形状贪心聚类：和已有某一类的平均字形相关值够高就并进去。"""
+    """按形状贪心聚类：和已有某一类的平均字形相关值够高就并进去。
+
+    贪心时平均字形边并边漂，先后次序一变，两种样子的同一个数字（压在弦线上的、夹在两弦间的）会并成一类、
+    平均字形糊掉：别的小节换了一帧，同一张图里的字就认不出了。所以贪心聚完再按各类最后的平均字形重新分几轮。
+    """
     centroids: list[np.ndarray] = []
     members: list[list[int]] = []
     for index, canvas in enumerate(canvases):
@@ -1211,7 +1269,24 @@ def _cluster(canvases: list[np.ndarray], threshold: float = 0.9) -> list[list[in
         members[best].append(index)
         count = len(members[best])
         centroids[best] = centroids[best] + (canvas - centroids[best]) / count
+    if not canvases:
+        return members
+    stack = np.stack(canvases).reshape(len(canvases), -1).astype(np.float64)
+    for _round in range(5):
+        means = np.stack([stack[group].mean(axis=0) for group in members])
+        # 和 _glyph_corr 一样的去均值归一化相关，一次算完。
+        nearest = np.argmax(_unit_rows(stack) @ _unit_rows(means).T, axis=1)
+        regrouped = [group for group in (np.flatnonzero(nearest == position).tolist() for position in range(len(members))) if group]
+        if regrouped == members:
+            break
+        members = regrouped
     return members
+
+
+def _unit_rows(matrix: np.ndarray) -> np.ndarray:
+    centred = matrix - matrix.mean(axis=1, keepdims=True)
+    norms = np.linalg.norm(centred, axis=1, keepdims=True)
+    return centred / np.where(norms < 1e-6, 1.0, norms)
 
 
 def onsets(notes: list[FretNote], spacing: float) -> list[Onset]:
@@ -1520,16 +1595,25 @@ def bass_attacks(image: np.ndarray, staff: TabStaff, bars: tuple[int, int] | Non
     y1 = max(y0, int(staff.top - 0.2 * spacing))
     x0, x1 = (bars[0], bars[-1]) if bars else (0, image.shape[1])
     ink = (image[y0:y1, x0:x1] < 128).astype(np.uint8)
+    if ink.size == 0:  # 谱线贴着画面上沿，或框是空的：connectedComponents 遇到空图会抛异常
+        return []
     count, labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
     found: list[tuple[float, str]] = []
+    boxes = [tuple(int(value) for value in stats[index, :4]) for index in range(1, count)]
     for index in range(1, count):
-        x, y, w, h = (int(value) for value in stats[index, :4])
+        x, y, w, h = boxes[index - 1]
         # 碰到带子上沿的是从上面伸下来的（五线谱离 TAB 近时的符干、符尾、符杠），不是浮在 TAB 上方的字。
         if y == 0:
             continue
         if not (0.5 * spacing <= h <= 0.9 * spacing and 0.3 * spacing <= w <= 0.7 * spacing):
             continue
         letter = _attack_letter(labels[y : y + h, x : x + w] == index)
+        if letter == "pop" and any(
+            _period(box, x + w, y + h, spacing) for box in boxes
+        ):
+            # 闷音 "P.M."：P 后面紧跟一个句点（单独的勾弦 P 没有）。M 常伸过小节线被切掉，位置按整个字约两个线距宽估。
+            found.append((x0 + x + 1.0 * spacing, "palm"))
+            continue
         if letter is not None:
             found.append((x0 + x + w / 2.0, letter))
     return found
@@ -1577,6 +1661,8 @@ def vibratos(image: np.ndarray, staff: TabStaff, bars: tuple[int, int] | None = 
     y1 = max(y0, int(staff.top - 0.2 * spacing))
     x0, x1 = (bars[0], bars[-1]) if bars else (0, image.shape[1])
     ink = (image[y0:y1, x0:x1] < 128).astype(np.uint8)
+    if ink.size == 0:  # 谱线贴着画面上沿，或框是空的：connectedComponents 遇到空图会抛异常
+        return []
     count, labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
     found: list[tuple[float, float]] = []
     for index in range(1, count):
@@ -1599,6 +1685,34 @@ def vibratos(image: np.ndarray, staff: TabStaff, bars: tuple[int, int] | None = 
     return found
 
 
+def staccato_dots(image: np.ndarray, staff: TabStaff, bars: tuple[int, int] | None = None) -> list[float]:
+    """纯 TAB 上的跳音：数字正上方、TAB 第一线上方 0.4~2 个线距处一个孤立的实心小圆点。返回圆点中心的横坐标。"""
+    spacing = staff.spacing
+    y0 = max(0, int(staff.top - 2.0 * spacing))
+    y1 = max(y0, int(staff.top - 0.3 * spacing))
+    x0, x1 = (bars[0], bars[-1]) if bars else (0, image.shape[1])
+    ink = (image[y0:y1, x0:x1] < 128).astype(np.uint8)
+    if ink.size == 0:  # 谱线贴着画面上沿，或框是空的：connectedComponents 遇到空图会抛异常
+        return []
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    letters = [tuple(int(value) for value in stats[index, :4]) for index in range(1, count) if stats[index, 3] >= 0.5 * spacing]
+    found: list[float] = []
+    for index in range(1, count):
+        x, y, w, h, area = (int(value) for value in stats[index])
+        if y == 0 or y + h >= ink.shape[0]:
+            continue
+        # 字母后面的句点（"P.M."、"sl."）不是跳音。
+        if any(_period((x, y, w, h), lx + lw, ly + lh, spacing) for lx, ly, lw, lh in letters):
+            continue
+        # 圆点：宽高差不多（0.12~0.4 个线距），填得满。
+        if not (0.12 * spacing <= w <= 0.4 * spacing and 0.12 * spacing <= h <= 0.4 * spacing and 0.6 <= w / h <= 1.6):
+            continue
+        if area < 0.55 * w * h:
+            continue
+        found.append(x0 + x + w / 2.0)
+    return found
+
+
 def bends(
     image: np.ndarray, staff: TabStaff, bank: Bank, bars: tuple[int, int] | None = None, ceiling: float | None = None
 ) -> list[tuple[float, float]]:
@@ -1617,6 +1731,8 @@ def bends(
     y1 = max(y0, int(staff.top - 0.2 * spacing))
     x0, x1 = (bars[0], bars[-1]) if bars else (0, image.shape[1])
     ink = (image[y0:y1, x0:x1] < 128).astype(np.uint8)
+    if ink.size == 0:  # 谱线贴着画面上沿，或框是空的：connectedComponents 遇到空图会抛异常
+        return []
     count, labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
     boxes = [tuple(int(value) for value in stats[index, :4]) for index in range(1, count)]
     found: list[tuple[float, float]] = []
@@ -1660,6 +1776,12 @@ def bends(
                 amount = 2.0 * int(read[0]) / int(read[1])
         found.append((tip_x, amount))
     return found
+
+
+def _period(box: tuple[int, ...], right: float, bottom: float, spacing: float) -> bool:
+    """box 是紧跟在字母（右沿 right、底边 bottom）后面的句点：小、底边齐平、左边贴着字母（可以稍微压进字母框里）。"""
+    x, y, w, h = box[:4]
+    return max(w, h) <= 0.4 * spacing and abs(y + h - bottom) <= 0.15 * spacing + 1 and -0.2 * spacing <= x - right <= 0.5 * spacing
 
 
 def _runs(row: np.ndarray) -> int:

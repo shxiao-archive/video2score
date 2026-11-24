@@ -107,6 +107,12 @@ def read_musicxml(path: Path) -> list[RefMeasure]:
         measures.append(
             RefMeasure(number=number, page=0, events=events, meter=meter, key=key, tempo=float(tempo) if tempo else None)
         )
+    # 弦数、调弦和 GP PDF 答案一样：调弦记在第一小节，弦数每小节都记。
+    tuning = read_tuning(path)
+    if measures and tuning:
+        measures[0].tuning = tuning
+        for measure in measures:
+            measure.strings = len(tuning)
     return measures
 
 
@@ -269,6 +275,8 @@ def _marks(note: ET.Element) -> set[str]:
         attack = gp_attack(notations)
         if attack:
             marks.add(attack)
+    if note.findtext("play/mute") == "palm":
+        marks.add("palm")
     return marks
 
 

@@ -42,6 +42,19 @@ class Slot:
     # 读出的小节号和把握（0~1）。order.arrange 填写。
     number: int | None = None
     number_score: float = 0.0
+    # 画面全是滚动中途补看来的（Tracker.add 的 glimpse）。
+    glimpsed: bool = False
+
+    def absorb(self, other: "Slot") -> None:
+        """把收重了的另一格并进来。只有滚动中途拖影画面的那一格不给这一格画面；这一格只有拖影画面时换成对方的。"""
+        self.seen += other.seen
+        if other.glimpsed and not self.glimpsed:
+            return
+        if self.glimpsed and not other.glimpsed:
+            self.observations.clear()
+            self.glimpsed = False
+        room = MAX_OBSERVATIONS - len(self.observations)
+        self.observations.extend(other.observations[: max(0, room)])
 
     @property
     def latest(self) -> Measure:
@@ -104,8 +117,11 @@ class Tracker:
         self._spacings: list[float] = []
         self._next_id = 0
 
-    def add(self, current: FrameMeasures) -> list[Slot]:
-        """收下一帧，返回这一帧每个小节对应的槽位（按阅读顺序）。"""
+    def add(self, current: FrameMeasures, glimpse: bool = False) -> list[Slot]:
+        """收下一帧，返回这一帧每个小节对应的槽位（按阅读顺序）。
+
+        glimpse：滚动中途补看的帧。滚动中有拖影，画面只给还没有停稳画面的槽位用（只在滚动中途整格露出的小节）；
+        已有停稳画面的槽位只记一次看到。之后停稳的帧看到它时，换掉补看来的画面。不然拖影会挤掉停稳时的画面，读错音、读错号。"""
         if not current.measures:
             return []
         if self._zoomed(current):
@@ -139,6 +155,12 @@ class Tracker:
         )
         final = [slot for slot in assigned if slot is not None]
         for measure, slot in zip(measures, final):
+            if glimpse and slot.seen and not slot.glimpsed:
+                slot.seen += 1
+                continue
+            if not glimpse and slot.glimpsed:
+                slot.observations.clear()
+            slot.glimpsed = glimpse
             slot.observe(measure)
         self._history.append((current, final))
         del self._history[:-_HISTORY]
@@ -207,6 +229,7 @@ class Tracker:
                         and abs(old.top - measure.top) <= tol
                         and loosely_same(old, measure)
                         and not numbers_conflict(old, measure)
+                        and not slot_conflict(slot, measure)
                     ),
                     None,
                 )
@@ -235,6 +258,7 @@ class Tracker:
                 same_measure(tail[start + k].latest, measures[k])
                 and labels_agree(tail[start + k].latest, measures[k])
                 and not numbers_conflict(tail[start + k].latest, measures[k])
+                and not slot_conflict(tail[start + k], measures[k])
                 for k in range(span)
             ):
                 if best is None or span > best[1]:
@@ -252,6 +276,7 @@ class Tracker:
                     and same_measure(seen, only)
                     and labels_agree(seen, only)
                     and not numbers_conflict(seen, only)
+                    and not slot_conflict(tail[start], only)
                 ):
                     best = (start, 1)
                     break
@@ -289,6 +314,7 @@ def _match_motion(
             offsets.append(candidate)
     best: tuple[tuple[bool, int, int, float], tuple[float, float]] | None = None
     for dx, dy in offsets:
+        still = abs(dx) <= tol_x and abs(dy) <= tol_y
         support = 0
         conflicts = 0
         expected = 0
@@ -309,14 +335,15 @@ def _match_motion(
                     and abs(a.top - top) <= tol_y
                     and same_measure(a, b)
                     and not numbers_conflict(a, b)
+                    # 画面没动时不拿槽位的号去否：静止时光标压着号，180 也会读成 130、把握 0.74。
+                    and (still or not slot_conflict(previous_slots[position], b))
                 ):
                     used.add(position)
                     support += 1
                     if _numbers_differ(a, b) or (not labels_agree(a, b) and not _numbers_same(a, b)):
                         conflicts += 1
                     if a.number is not None and b.number is not None and min(a.number_score, b.number_score) >= _READ:
-                        # 一边被截掉了前面的位（146 读成 46）也算一样。
-                        same = str(a.number).endswith(str(b.number)) or str(b.number).endswith(str(a.number))
+                        same = _same_number(a.number, b.number)
                         agree += same
                         disagree += not same
                     break
@@ -329,7 +356,6 @@ def _match_motion(
         # 音符都对得上、小节号却大半对不上：是换成了一段长得一样的新小节，不是没动。
         # 挪动了的位移，正好一半对不上也不要：整页翻到一段一样的反复（比如 100~101 和 102~103 一模一样）时，
         # 新页常正好能挪一下对上两个小节，号只读准了一个。
-        still = abs(dx) <= tol_x and abs(dy) <= tol_y
         if conflicts * 2 > support or (conflicts and conflicts * 2 == support and not still):
             continue
         # 谱面很小（线距七八个像素）时号读得都不太准，单看哪一对都不够"一定不同"；但真是同一批小节的话，
@@ -347,6 +373,7 @@ def _match_motion(
     if best is None:
         return None
     dx, dy = best[1]
+    still = abs(dx) <= tol_x and abs(dy) <= tol_y
     # 位移定了以后，落在同一位置的小节放宽来认：背景动画、音符弹跳、
     # 小节线差几像素都会让长相差一点，但位置和整体都对得上，就是同一个。
     assigned: list[Slot | None] = [None] * len(new)
@@ -365,7 +392,7 @@ def _match_motion(
             union = max(a.right, right) - min(a.left, left)
             if union <= 0 or overlap / union < 0.85:
                 continue
-            if loosely_same(a, b) and not numbers_conflict(a, b):
+            if loosely_same(a, b) and not numbers_conflict(a, b) and (still or not slot_conflict(previous_slots[position], b)):
                 assigned[index] = previous_slots[position]
                 used.add(position)
                 break
@@ -374,18 +401,35 @@ def _match_motion(
 
 def numbers_conflict(left: Measure, right: Measure) -> bool:
     """两边都清楚地读到了小节号，而且号不同：一定不是同一个小节。"""
-    if left.number is None or right.number is None or left.number == right.number:
+    if left.number is None or right.number is None or _same_number(left.number, right.number):
         return False
     return min(left.number_score, right.number_score) >= _SURE
+
+
+def slot_conflict(slot: Slot, measure: Measure) -> bool:
+    """槽位里读得最准的那次号和这个小节的号冲突。只比最近一次不够：翻页后那次常没读出号，
+    长得像的和弦小节（一排三音和弦）就被并进了号早已读清楚的另一个小节。
+    取的是好几帧里最准的一次，门槛用 _numbers_differ 的 0.7：有的视频号一直只读到 0.7 出头。
+    位数不同不算：小节线、光标压住一位时 118 常读成 11、把握还有 0.8，分不出是不是同一个号。"""
+    read = [item for item in slot.observations if item.number is not None]
+    if not read or measure.number is None:
+        return False
+    best = max(read, key=lambda item: item.number_score)
+    return len(str(best.number)) == len(str(measure.number)) and _numbers_differ(best, measure)
 
 
 def _numbers_differ(left: Measure, right: Measure) -> bool:
     """两边的号都读得还算有把握（不到"一定不是同一个"那么准）、又不一样：算一处冲突。
     反复段里一模一样的小节翻页后正好落在原来的位置上，小节号是唯一能分开它们的东西。
     门槛 0.7：0.6 时两个一样的相邻小节的号读得含糊，被当成冲突，同一小节的位移没对上，丢了一个。"""
-    if left.number is None or right.number is None or left.number == right.number:
+    if left.number is None or right.number is None or _same_number(left.number, right.number):
         return False
     return min(left.number_score, right.number_score) >= 0.7
+
+
+def _same_number(left: int, right: int) -> bool:
+    """号一样，或一边被截掉了前面的位（165 读成 65：滚动中途前一位常被小节线、光标压住）。"""
+    return str(left).endswith(str(right)) or str(right).endswith(str(left))
 
 
 # 比较配对的号是否一致时，读数要有这么有把握才算"读出了号"。

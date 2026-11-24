@@ -66,7 +66,7 @@ def compare(ours: list[ScoreMeasure], reference: list[RefMeasure]) -> Comparison
             continue
         result.measures += 1
         ref_events = [_event_token(e.duration, e.rest, [(f.string, f.fret) for f in e.frets]) for e in ref.events]
-        ref_frets = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in ref.events for f in e.frets]
+        ref_frets = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in ref.events for f in sorted(e.frets, key=lambda f: f.string)]
         ref_notes = [token for token, e in zip(ref_events, ref.events) if not e.rest]
         result.frets += len(ref_frets)
         result.notes += len(ref_notes)
@@ -184,7 +184,7 @@ def align_structure(ours: list[ScoreMeasure], reference: list[RefMeasure]) -> St
         if measure.count > 1:
             ref_units.extend((measure.number + k, []) for k in range(measure.count))
         else:
-            tokens = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in measure.events for f in e.frets]
+            tokens = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in measure.events for f in sorted(e.frets, key=lambda f: f.string)]
             ref_units.append((measure.number, tokens))
     our_units: list[tuple[int | None, list[str]]] = []
     for measure in ours:
@@ -281,6 +281,7 @@ _MARK_NAMES = {
     "dead": "闷音",
     "slap": "拍弦",
     "pop": "勾弦（pop）",
+    "palm": "闷音（P.M.）",
     "bend-0.5": "推弦 0.5",
     "bend-1": "推弦 1",
     "bend-1.5": "推弦 1.5",
@@ -383,7 +384,7 @@ def _compare_ref(ours: list[RefMeasure], reference: list[RefMeasure]) -> Compari
     for ref in reference:
         result.measures += 1
         ref_events = _rest_measure(ref) or [_event_token(e.duration, e.rest, [(f.string, f.fret) for f in e.frets]) for e in ref.events]
-        ref_frets = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in ref.events for f in e.frets]
+        ref_frets = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in ref.events for f in sorted(e.frets, key=lambda f: f.string)]
         ref_notes = [token for token, e in zip(ref_events, ref.events) if not e.rest]
         result.frets += len(ref_frets)
         result.notes += len(ref_notes)
@@ -395,7 +396,7 @@ def _compare_ref(ours: list[RefMeasure], reference: list[RefMeasure]) -> Compari
         our_events = _rest_measure(measure) or [
             _event_token(e.duration, e.rest or not e.frets, [(f.string, f.fret) for f in e.frets]) for e in measure.events
         ]
-        our_frets = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in measure.events if not e.rest for f in e.frets]
+        our_frets = [f"{f.string}:{f.fret if f.fret is not None else 'x'}" for e in measure.events if not e.rest for f in sorted(e.frets, key=lambda f: f.string)]
         our_notes = [token for token, e in zip(our_events, measure.events) if not (e.rest or not e.frets)]
         fret_hits = _lcs(ref_frets, our_frets)
         result.frets_right += fret_hits

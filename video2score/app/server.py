@@ -76,7 +76,7 @@ class App:
 
     # ------------------------------------------------------------ 任务
 
-    def convert(self, source: str, link: str | None, exports: list[str], label: str | None = None) -> Task:
+    def convert(self, source: str, link: str | None, exports: list[str], label: str | None = None, instrument: str | None = None) -> Task:
         """转谱：先跑识别（截图谱、MusicXML），再按勾选导出；导出失败只记一句，作业照样算完成。"""
         from video2score.run import Options, run
 
@@ -84,9 +84,11 @@ class App:
         if not source:
             raise ValueError("请粘贴视频链接，或拖入一个视频文件。")
         wanted = self._exports(exports)
+        if instrument not in (None, "bass", "guitar"):
+            raise ValueError("乐器只能选贝斯或吉他。")
 
         def work(task: Task) -> str:
-            job = run(source, Options(link=link or None), progress=task.say)
+            job = run(source, Options(link=link or None, instrument=instrument), progress=task.say)
             task.job = job.name
             self._export(task, job, wanted)
             return job.name
@@ -258,7 +260,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post_convert(self, _parts: list[str]) -> None:
         body = self._body()
-        task = self.app.convert(str(body.get("source") or ""), body.get("link"), list(body.get("exports") or []), body.get("label"))
+        task = self.app.convert(str(body.get("source") or ""), body.get("link"), list(body.get("exports") or []), body.get("label"), body.get("instrument") or None)
         self._json(task.to_dict())
 
     def _post_upload(self, _parts: list[str]) -> None:

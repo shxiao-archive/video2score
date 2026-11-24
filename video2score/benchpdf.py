@@ -46,11 +46,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             video = _video(folder)
             job_dir = None if rerun else _latest_job(video)
+            instrument = _instrument(answers[0])
             if job_dir is None:
-                job_dir = run(str(video), Options(), progress=None)
+                job_dir = run(str(video), Options(instrument=instrument), progress=None)
             # 每次按现在的识别代码重新导出 MusicXML（不用重跑视频），再拿导出的文件和答案比。
             manifest = load_manifest(job_dir)
             manifest.setdefault("artifacts", {})
+            manifest["instrument"] = instrument
             write_tab_score(job_dir, manifest, title=folder.name)
             save_manifest(job_dir, manifest)
             measures = read_job(job_dir)
@@ -105,6 +107,14 @@ def _pdf_bench(wanted: set[str]) -> int:
                 text = f"出错 {exc}"
             print(f"{folder.name}（{time.time() - started:.0f} 秒）\n  {text}", flush=True)
     return 0
+
+
+def _instrument(answer: Path) -> str:
+    """测试时替用户选乐器：MusicXML 答案按调弦（最低弦低于 C2 是贝斯），别的答案都是贝斯谱。"""
+    from video2score.refxml import read_tuning
+
+    tuning = read_tuning(answer) if answer.suffix.lower() in (".musicxml", ".xml") else None
+    return "guitar" if tuning and min(tuning) >= 36 else "bass"
 
 
 def _gp_bars(path: Path) -> int:
