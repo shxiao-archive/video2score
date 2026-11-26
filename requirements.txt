@@ -5,7 +5,7 @@ Pillow==12.3.0
 pymupdf==1.28.2
 curl_cffi==0.16.3
 qrcode==8.2
-yt-dlp==2026.8.19
+yt-dlp==2026.11.23
 yt-dlp-ejs==0.8.0
 pyguitarpro==0.11
 # 上面这些带进来的
