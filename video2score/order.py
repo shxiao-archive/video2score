@@ -315,6 +315,14 @@ def _drop_redundant(slots: list[Slot]) -> tuple[list[Slot], int]:
         # 是追踪收重、号又没读出来的一份（整页视图里行首小节的号印在谱号后面，常读不出），排序时落到了最后。
         last = slots[numbered[-1]]
         drop.update(index for index in range(numbered[-1] + 1, len(slots)) if slots[index].first_seconds + _LATE < last.first_seconds)
+        # 播完又倒回开头重放：结尾后面出现、长得像开头那一小节的无号槽位，连同它后面的，都是重放。
+        # 重放时画面上压着光标，追踪没能并回去，只能按“大体一致”比（开头小节带谱号、拍号，和别的小节差得远）。
+        replay = next(
+            (index for index in range(numbered[-1] + 1, len(slots)) if slots[index].first_seconds > last.first_seconds and loosely_same(slots[0].latest, slots[index].latest)),
+            None,
+        )
+        if replay is not None:
+            drop.update(range(replay, len(slots)))
     for left, right in zip(numbered, numbered[1:]):
         run = list(range(left + 1, right))
         if not run:

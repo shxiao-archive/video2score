@@ -15,7 +15,7 @@ from typing import Any
 from video2score.jobs import load_manifest
 from video2score.paths import JOBS_DIR, TRASH_DIR, UPLOADS_DIR
 
-# 作业目录名：20261004-080439-1d78。jobs/ 下以 _ 开头的是测试集、回收站这类，不是作业。
+# 作业目录名：年月日-时分秒-4 位十六进制。jobs/ 下以 _ 开头的是测试集、回收站这类，不是作业。
 _JOB_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")
 
 # manifest 里的产物，按界面上的顺序；(名称, 下载时文件名的后缀)。

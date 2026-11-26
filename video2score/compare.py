@@ -302,6 +302,7 @@ class XmlComparison:
     keys: list[int] = field(default_factory=lambda: [0, 0])  # [对, 总]
     meters: list[int] = field(default_factory=lambda: [0, 0])
     tempo: tuple[float | None, float | None] = (None, None)
+    repeats: list[int] = field(default_factory=lambda: [0, 0, 0])  # 反复线（含遍数）：[都有, 答案有我们没有, 我们有答案没有]
 
     def summary(self) -> str:
         lines = [self.core.summary()]
@@ -321,15 +322,23 @@ class XmlComparison:
             if hit or miss or false:
                 parts.append(f"{label} {hit}/{hit + miss}" + (f"（多 {false}）" if false else ""))
         lines.append("技巧（找到/答案里有）：" + ("，".join(parts) or "无"))
+        hit, miss, false = self.repeats
+        if hit or miss or false:
+            lines.append(f"反复线（找到/答案里有）：{hit}/{hit + miss}" + (f"（多 {false}）" if false else ""))
         return "\n".join(lines)
 
 
 def compare_xml(ours_path: Path, answer_path: Path) -> XmlComparison:
-    from video2score.refxml import read_musicxml, read_tuning
+    from video2score.refxml import expands_like, read_musicxml, read_tuning, repeat_marks
 
-    ours = read_musicxml(ours_path)
-    answer = read_musicxml(answer_path)
+    # 我们的号是视频上印的号，不展开；答案照视频的画法决定展开不展开。
+    expand = expands_like(ours_path, answer_path)
+    ours = read_musicxml(ours_path, expand=False)
+    answer = read_musicxml(answer_path, expand=expand)
     result = XmlComparison(core=_compare_ref(ours, answer), tuning=(read_tuning(ours_path), read_tuning(answer_path)))
+    # 视频画的是展开谱时画面上没有反复线，答案里的不算。
+    found, wanted = repeat_marks(ours_path), set() if expand else repeat_marks(answer_path)
+    result.repeats = [len(found & wanted), len(wanted - found), len(found - wanted)]
     mine = {measure.number: measure for measure in ours}
     result.tempo = (next((m.tempo for m in ours if m.tempo), None), next((m.tempo for m in answer if m.tempo), None))
     our_key = answer_key = None

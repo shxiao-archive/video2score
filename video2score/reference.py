@@ -156,12 +156,12 @@ class _System:
         return (self.staff or self.tab).x1
 
 
-def read_reference(path: Path) -> list[RefMeasure]:
-    """标准答案：GP 导出的 PDF，或者 MusicXML（.musicxml / .xml，见 refxml.py）。"""
+def read_reference(path: Path, expand: bool = True) -> list[RefMeasure]:
+    """标准答案：GP 导出的 PDF，或者 MusicXML（.musicxml / .xml，见 refxml.py）。expand：MusicXML 里的反复展不展开。"""
     if Path(path).suffix.lower() in (".musicxml", ".xml"):
         from video2score.refxml import read_musicxml
 
-        return read_musicxml(Path(path))
+        return read_musicxml(Path(path), expand)
     import pymupdf
 
     measures: list[RefMeasure] = []

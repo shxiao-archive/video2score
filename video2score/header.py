@@ -179,7 +179,15 @@ def _header_end(measure: CleanMeasure) -> int | None:
         if _bold(symbols[:, start + a : start + b], spacing) > 0.3 and height >= 3.3 * spacing:
             break
         end = b
-    return start + end + max(2, int(round(0.3 * spacing)))
+    tail = start + end + max(2, int(round(0.3 * spacing)))
+    after = segments[1] if len(segments) > 1 else None
+    meter_next = after is not None and _bold(symbols[:, start + after[0] : start + after[1]], spacing) > 0.3 and heights[1] >= 3.3 * spacing
+    if end == first[1] and not is_tab and not meter_next:
+        # 谱号和调号之间空得比上面的门槛宽：按调号的位置规则再认一次（谱号定不了高低音，两套都试）。
+        # 谱号后面紧跟着拍号就不认：拍号数字的竖笔会被另一套谱号的规则当成降号。
+        keys = [key_signature(measure.image, list(ys), spacing, measure.left_bar, measure.right_bar, bass) for bass in (True, False)]
+        tail = max([tail] + [key[1] + max(2, int(round(0.3 * spacing))) for key in keys if key is not None])
+    return tail
 
 
 def _bold(patch: np.ndarray, spacing: float) -> float:
@@ -243,7 +251,8 @@ def key_signature(image: np.ndarray, lines: list[float], spacing: float, x0: int
     if clef is not None:
         start = max(start, float(clef - x0))
         found = [item for item in found if item[0] >= start]
-    if not found or found[0][0] - start > 1.5 * spacing:
+    # 谱号后面第一个升降号可以离得远些（有的谱空出近两个线距）；小节线后面紧挨着的才算，免得把音符当调号。
+    if not found or found[0][0] - start > (2.5 if clef is not None else 1.5) * spacing:
         return None
     chain = [found[0]]
     for item in found[1:]:
@@ -298,7 +307,7 @@ def _flats(chain: list[tuple[int, float, float]], ink_full: np.ndarray, top: int
         if bowl.size == 0 or bowl.any(axis=0).sum() < 0.3 * spacing:
             break
         count += 1
-        right = x + int(round(0.7 * spacing))
+        right = x + int(round(0.9 * spacing))  # 圆肚宽到 0.85 个线距（放大后的画面边缘发虚）
     return (count, right) if count else None
 
 

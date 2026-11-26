@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
-from video2score.refxml import bend_amount, gp_attack, parse_musicxml, played_measures
+from video2score.refxml import bend_amount, expands_like, gp_attack, parse_musicxml, played_measures
 
 _STEPS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 # 每个音比哪几项；五线谱和 TAB 各比各的。
@@ -114,7 +114,8 @@ class XmlDiff:
 
 
 def diff_musicxml(ours_path: Path, answer_path: Path) -> XmlDiff:
-    ours, answer = _read(ours_path), _read(answer_path)
+    # 我们的号是视频上印的号，不展开；答案照视频的画法决定展开不展开。
+    ours, answer = _read(ours_path, False), _read(answer_path, expands_like(ours_path, answer_path))
     result = XmlDiff()
     result.tuning = (_tuning(ours_path), _tuning(answer_path))
     result.roles = {
@@ -236,7 +237,7 @@ def _short(note: _Note) -> str:
     return text + (" 装饰音" if note.grace else "")
 
 
-def _read(path: Path) -> dict[str, _Measure]:
+def _read(path: Path, expand: bool = True) -> dict[str, _Measure]:
     root = parse_musicxml(path)
     part = root.find("part")
     measures: dict[str, _Measure] = {}
@@ -246,7 +247,7 @@ def _read(path: Path) -> dict[str, _Measure]:
     roles: dict[str, str] = {}
     if part is None:
         return measures
-    for number, element in played_measures(part):
+    for number, element in played_measures(part, expand):
         number = number or ""
         measure = _Measure(number)
         position = Fraction(0)

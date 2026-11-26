@@ -6,8 +6,8 @@
 推弦、揉弦、延长记号、拍弦勾弦）两行谱上的合在一起。拍弦勾弦 GP 写成 <notations> 里的处理指令
 <?GP <root><bass-attack type="slap"/></root>?>，所以解析时要保留处理指令。
 合并休止在 MusicXML 里是逐小节写的全休止，照样一小节一格。
-答案里的反复记号（反复线、几房跳跃）按演奏顺序展开、从头连续编号：视频里的 GP 画面是展开画的（比如 38~41 演两遍，
-第二遍画成 42~45），展开后才和视频的小节号对得上。
+答案里的反复记号（反复线、几房跳跃）按演奏顺序展开、从头连续编号：有的视频里的 GP 画面是展开画的（比如 38~41 演两遍，
+第二遍画成 42~45），展开后才和视频的小节号对得上。也有视频照原样画反复线、小节号和原谱一样，这时不展开（见 expands_like）。
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def bend_amount(text: str | None) -> str:
     return str(int(value)) if value == int(value) else str(value)
 
 
-def read_musicxml(path: Path) -> list[RefMeasure]:
+def read_musicxml(path: Path, expand: bool = True) -> list[RefMeasure]:
     root = parse_musicxml(path)
     part = root.find("part")
     if part is None:
@@ -73,7 +73,7 @@ def read_musicxml(path: Path) -> list[RefMeasure]:
     measures: list[RefMeasure] = []
     divisions = 1
     meter: Fraction | None = None
-    for number, element in played_measures(part):
+    for number, element in played_measures(part, expand):
         attributes = element.find("attributes")
         key: int | None = None
         if attributes is not None:
@@ -134,10 +134,20 @@ def read_tuning(path: Path) -> tuple[int, ...] | None:
     return None
 
 
-def played_measures(part: ET.Element) -> list[tuple[str | None, ET.Element]]:
-    """按演奏顺序排好的 (小节号, 小节)。没有反复记号时就是原样、原号；有的话展开，从第一小节的号起连续编号。"""
+def expands_like(ours: Path, answer: Path) -> bool:
+    """答案的反复要不要展开，才和我们的小节号（视频上印的号）对得上：看我们最后一个小节号离原样的小节数近，还是离展开后的近。"""
+    ours_part, answer_part = parse_musicxml(ours).find("part"), parse_musicxml(answer).find("part")
+    if ours_part is None or answer_part is None:
+        return True
+    last = max((_number(measure.get("number"), []) for measure in ours_part.findall("measure")), default=0)
+    written, played = len(answer_part.findall("measure")), len(played_measures(answer_part))
+    return abs(played - last) <= abs(written - last)
+
+
+def played_measures(part: ET.Element, expand: bool = True) -> list[tuple[str | None, ET.Element]]:
+    """按演奏顺序排好的 (小节号, 小节)。没有反复记号（或 expand=False）时就是原样、原号；有的话展开，从第一小节的号起连续编号。"""
     written = part.findall("measure")
-    if not any(barline.find("repeat") is not None for measure in written for barline in measure.findall("barline")):
+    if not expand or not any(barline.find("repeat") is not None for measure in written for barline in measure.findall("barline")):
         return [(measure.get("number"), measure) for measure in written]
     order: list[ET.Element] = []
     start = 0  # 往回跳到哪一小节（最近的正向反复线，没有就是开头）
@@ -167,6 +177,18 @@ def played_measures(part: ET.Element) -> list[tuple[str | None, ET.Element]]:
         index += 1
     first = _number(written[0].get("number"), [])
     return [(str(first + offset), measure) for offset, measure in enumerate(order)]
+
+
+def repeat_marks(path: Path) -> set[tuple[str, str, int]]:
+    """原样（不展开）的反复线：(小节号, forward/backward, 演几遍)，正向反复线的遍数记 0。"""
+    part = parse_musicxml(path).find("part")
+    found = set()
+    for measure in part.findall("measure") if part is not None else []:
+        for direction in ("forward", "backward"):
+            repeat = _repeat(measure, direction)
+            if repeat is not None:
+                found.add((measure.get("number") or "", direction, int(repeat.get("times") or 2) if direction == "backward" else 0))
+    return found
 
 
 def _repeat(measure: ET.Element, direction: str) -> ET.Element | None:

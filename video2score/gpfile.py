@@ -80,6 +80,8 @@ class GpBar:
     time: tuple[int, int]
     key: int
     beats: list[GpBeat] = field(default_factory=list)
+    repeat_start: bool = False  # 左边是正向反复线
+    repeat_count: int = 0  # 右边是反向反复线时这一段一共演几遍，0 是没有
 
 
 @dataclass
@@ -136,6 +138,12 @@ def read_score(path: Path, title: str | None = None) -> GpScore:
             if minute:
                 tempo = int(round(float(minute)))
         bar = GpBar(time, key)
+        for barline in measure.findall("barline"):
+            repeat = barline.find("repeat")
+            if repeat is not None and repeat.get("direction") == "forward":
+                bar.repeat_start = True
+            elif repeat is not None and repeat.get("direction") == "backward":
+                bar.repeat_count = int(repeat.get("times") or 2)
         for note in measure.findall("note"):
             staff = note.findtext("staff") or "1"
             if tab_staff is not None and staff != tab_staff:
@@ -277,6 +285,9 @@ def gpif(score: GpScore) -> str:
             position += beat.length
         if fermatas:
             out.append("<Fermatas>" + "".join(fermatas) + "</Fermatas>")
+        if bar.repeat_start or bar.repeat_count:
+            start, end = str(bar.repeat_start).lower(), str(bool(bar.repeat_count)).lower()
+            out.append(f'<Repeat start="{start}" end="{end}" count="{bar.repeat_count}" />')
         out.append(f"<Bars>{index}</Bars>")
         out.append("</MasterBar>")
     out.append("</MasterBars>")
@@ -497,6 +508,8 @@ def write_gp5(path: Path, score: GpScore) -> None:
         header.timeSignature.numerator = bar.time[0]
         header.timeSignature.denominator.value = bar.time[1]
         header.keySignature = _gp5_key(gp, bar.key)
+        header.isRepeatOpen = bar.repeat_start
+        header.repeatClose = bar.repeat_count - 1 if bar.repeat_count else -1  # pyguitarpro 记的是“再演几遍”
         song.measureHeaders.append(header)
         measure = gp.Measure(track, header)
         track.measures.append(measure)

@@ -283,7 +283,10 @@ def _system_measures(
     lines = tuple(line + dy for staff in system.staves for line in staff.lines)
     height = int(round((PAD_ABOVE + PAD_BELOW) * spacing + (system.bottom - system.top)))
     found: list[Measure] = []
-    for left, right in zip(system.bars, system.bars[1:]):
+    # 谱行开头只有谱号、调号、拍号的那一段（后面紧跟反复线）不算小节，并进第一小节左边的前缀图。
+    head_left: int | None = None
+    bars = _clef_edge(system, darkness) + list(system.bars)
+    for left, right in zip(bars, bars[1:]):
         if right - left < min_width:
             continue
         measure = Measure(
@@ -312,8 +315,8 @@ def _system_measures(
         patch[lo - oy : hi - oy, cx0 - ox : cx1 - ox] = darkness[lo - dy : hi - dy, cx0 - dx : cx1 - dx]
         measure.darkness = patch
         if not found:
-            # 谱行第一小节（开头那段谱线太短、不算小节时，是第二段）左边：乐器名、调弦字母。
-            measure.prefix = _prefix_patch(darkness, box, (ox, oy), (lo, hi), height, spacing)
+            # 谱行第一小节（开头那段谱线太短、不算小节时，是第二段）左边：乐器名、调弦字母（和只有谱头的那一段）。
+            measure.prefix = _prefix_patch(darkness, box, (ox, oy), (lo, hi), height, spacing, head_left)
         if tinted is not None:
             colored = np.zeros((height, width), np.uint8)
             colored[lo - oy : hi - oy, cx0 - ox : cx1 - ox] = tinted[lo - dy : hi - dy, cx0 - dx : cx1 - dx]
@@ -323,8 +326,12 @@ def _system_measures(
         found_label = _label_patch(darkness, measure, box)
         if found_label is not None:
             measure.label, measure.label_valid = found_label
-        if not found and _lines_start_at(darkness, measure, box):
+        if not found and head_left is None and _lines_start_at(darkness, measure, box):
             end = _header_end(patch, measure)
+            # 只有 TAB 的谱行开头是“TAB”字样加拍号，后面的空小节也像只有谱头：要有五线谱才认。
+            if end is not None and measure.layout and measure.layout[0][2] == "staff" and _header_only(patch, measure, end):
+                head_left = left
+                continue
             if end is not None:
                 # 右边不能伸到下一小节的号上。
                 right_edge = min(end + HEAD_LABEL_RIGHT * spacing, measure.right - 1.0 * spacing)
@@ -337,6 +344,36 @@ def _system_measures(
     return found
 
 
+def _clef_edge(system: System, darkness: np.ndarray) -> list[int]:
+    """谱线一直通到画面左边缘、紧贴着边缘就是谱号时（视频把谱行开头的竖线裁在了画面外），画面边缘当这一行的左边界：
+    返回要补在最前面的那条“小节线”（darkness 的列），不是这种情况返回空。横向滚动的谱只有全曲开头印谱号，
+    别处被画面边缘截断的小节开头不会是谱号。被截断的一串连杠音符、画面边上的装饰花纹也又宽又高，像谱号：
+    有 TAB 时 TAB 开头还要有竖着叠起来的三个字母（窄而高）才算。"""
+    from video2score.header import _clef_end, _height, _segments
+
+    if system.left > 3 or not system.bars or len(system.staves) not in (1, 2):
+        return []
+    left = max(system.left, _MARGIN)
+    if system.bars[0] - left < 4.0 * system.spacing:
+        return []
+    image = 255 - darkness
+    staff, *tab = sorted(system.staves, key=lambda item: item.top)
+    if _clef_end(image, list(staff.lines), staff.spacing, left, system.bars[0]) is None:
+        return []
+    if tab:
+        sp = tab[0].spacing
+        top, bottom = int(max(0, tab[0].lines[0] - 0.5 * sp)), int(tab[0].lines[-1] + 0.5 * sp)
+        ink = (image[top:bottom, left : left + int(4 * sp)] < 128).astype(np.uint8)
+        ink = cv2.subtract(ink, cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((1, max(5, int(round(1.5 * sp)))), np.uint8)))
+        segments = _segments(ink.sum(axis=0) > 0, max(1, int(round(0.3 * sp))))
+        if not segments:
+            return []
+        a, b = segments[0]
+        if a > 1.5 * sp or b - a > 1.3 * sp or _height(ink[:, a:b]) < 2.0 * sp:
+            return []
+    return [left]
+
+
 def _prefix_patch(
     darkness: np.ndarray,
     box: tuple[int, int, int, int],
@@ -344,12 +381,14 @@ def _prefix_patch(
     rows: tuple[int, int],
     height: int,
     spacing: float,
+    head_left: int | None = None,
 ) -> np.ndarray:
-    """谱行开头左边那一段：小节图左端（整帧坐标 origin）往左 PREFIX_WIDTH 个线距，行和小节图对齐，截到谱面框边为止。"""
+    """谱行开头左边那一段：小节图左端（整帧坐标 origin）往左 PREFIX_WIDTH 个线距，行和小节图对齐，截到谱面框边为止。
+    head_left：谱行开头只有谱头的那一段的左小节线，从它再往左 PREFIX_WIDTH 个线距截起。"""
     dx, dy = box[0], box[1]
     ox, oy = origin
     lo, hi = rows
-    width = int(round(PREFIX_WIDTH * spacing))
+    width = int(round(PREFIX_WIDTH * spacing)) + (ox - head_left if head_left is not None else 0)
     patch = np.zeros((height, width), np.uint8)
     x0, x1 = max(ox - width, dx), ox
     if x1 > x0:
@@ -464,16 +503,10 @@ def _header_end(patch: np.ndarray, measure: Measure) -> int | None:
     from video2score.header import _bold, _height, _segments
 
     spacing = measure.spacing
-    ox, oy = measure.origin
-    count = int(measure.layout[0][0]) if measure.layout else 5
-    ys = [measure.top + line - oy for line in measure.lines[:count]]
-    y0 = max(0, int(ys[0] - 1.0 * spacing))
-    y1 = min(patch.shape[0], int(ys[-1] + 1.0 * spacing) + 1)
-    if y1 - y0 < 3:
+    ox, _oy = measure.origin
+    symbols = _staff_symbols(patch, measure)
+    if symbols is None:
         return None
-    ink = (patch[y0:y1] >= 128).astype(np.uint8)
-    lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((1, max(5, int(round(1.5 * spacing)))), np.uint8))
-    symbols = cv2.subtract(ink, lines)
     start = measure.left - ox + max(2, int(round(0.25 * spacing)))
     stop = measure.right - ox
     if stop - start < 4:
@@ -493,6 +526,50 @@ def _header_end(patch: np.ndarray, measure: Measure) -> int | None:
         if _bold(symbols[:, start + a : start + b], spacing) > 0.3 and height >= 3.3 * spacing:
             break
     return ox + start + end
+
+
+def _staff_symbols(patch: np.ndarray, measure: Measure, group: int = 0) -> np.ndarray | None:
+    """第 group 组谱线上下各一个线距里、去掉谱线以后的墨（列号和 patch 一样）。没有这一组返回 None。"""
+    spacing = measure.spacing
+    _ox, oy = measure.origin
+    counts = [int(item[0]) for item in measure.layout] if measure.layout else [5]
+    if group >= len(counts):
+        return None
+    first = sum(counts[:group])
+    ys = [measure.top + line - oy for line in measure.lines[first : first + counts[group]]]
+    if not ys:
+        return None
+    y0 = max(0, int(ys[0] - 1.0 * spacing))
+    y1 = min(patch.shape[0], int(ys[-1] + 1.0 * spacing) + 1)
+    if y1 - y0 < 3:
+        return None
+    ink = (patch[y0:y1] >= 128).astype(np.uint8)
+    lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((1, max(5, int(round(1.5 * spacing)))), np.uint8))
+    return cv2.subtract(ink, lines)
+
+
+def _header_only(patch: np.ndarray, measure: Measure, end: int) -> bool:
+    """谱头（_header_end 的右端 end，整帧 x）到右小节线之间没有音：这一段只有谱号、调号、拍号（后面紧跟反复线）。
+
+    _header_end 会把又高又密的一串升号当成拍号停下，所以后面还许有一个拍号（又高又粗的窄段）；
+    别的小节线上的段（休止符、音符）一个都不许有，TAB 那几行也不许有字。
+    """
+    from video2score.header import _bold, _height, _segments
+
+    spacing = measure.spacing
+    ox, _oy = measure.origin
+    x0 = end - ox + int(round(0.3 * spacing))
+    x1 = measure.right - ox - int(round(0.7 * spacing))  # 反复线的粗线比细小节线宽，抗锯齿的边会伸过来
+    staff = _staff_symbols(patch, measure)
+    if staff is None or x1 <= x0:
+        return False
+    segments = _segments(staff[:, x0:x1].sum(axis=0) > 0, max(1, int(round(0.3 * spacing))))
+    for a, b in segments:
+        piece = staff[:, x0 + a : x0 + b]
+        if len(segments) > 1 or b - a > 2.5 * spacing or _height(piece) < 3.3 * spacing or _bold(piece, spacing) < 0.5:
+            return False
+    tab = _staff_symbols(patch, measure, 1)
+    return tab is None or not tab[:, x0:x1].any()
 
 
 def _head(measure: Measure) -> np.ndarray | None:

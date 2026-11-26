@@ -179,12 +179,60 @@ def read_tempo(image: np.ndarray, staff_top: float, spacing: float, bars: tuple[
         mask = np.isin(labels, indices)
         rows = np.flatnonzero(mask[:, x:end].any(axis=1))
         digits.append((x, mask[rows[0] : rows[-1] + 1, x:end]))
+    text = _digit_text([piece for _x, piece in sorted(digits, key=lambda item: item[0])])
+    if text is None:
+        return None
+    value = int(text)
+    return value if 20 <= value <= 400 else None
+
+
+def read_repeat_times(left: np.ndarray, right: np.ndarray, tops: tuple[float, float], spacing: float, bars: tuple[int, int]) -> int | None:
+    """反复线正上方印的“3x”“17x”：几位粗体数字后面跟一个矮一截的 x。读不出返回 None。
+
+    字骑在反复线上，被两格小节图从中间切开：left 是带这道反复线的那一格（线在 bars[0] 列），right 是下一格（左小节线在
+    bars[1] 列），各按自己的五线谱顶线 tops 取谱线上方那一条，在线处拼起来再读。
+    """
+    reach = int(round(4 * spacing))
+    strips = []
+    for image, top, x0, x1 in ((left, tops[0], bars[0] - reach, bars[0]), (right, tops[1], bars[1], bars[1] + reach)):
+        y0, y1 = int(round(top - 4.5 * spacing)), int(round(top - 0.3 * spacing))
+        if y0 < 0 or x0 < 0 or y1 > image.shape[0] or x1 > image.shape[1]:
+            return None
+        strips.append(image[y0:y1, x0:x1])
+    region = (np.hstack(strips) < 128).astype(np.uint8)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(region, connectivity=8)
+    pieces = [(int(x), int(x + w), int(y + h), int(h), index) for index, (x, y, w, h, _area) in enumerate(stats) if index and 0.4 * spacing <= h <= 2.2 * spacing]
+    if not pieces:
+        return None
+    # 以最高的那块（粗体数字）为准：底边对齐、彼此挨着的几块是一个记号。小节号字小、贴着谱线，底边对不上。
+    tallest = max(pieces, key=lambda piece: piece[3])
+    row = sorted(piece for piece in pieces if abs(piece[2] - tallest[2]) <= 0.3 * spacing)
+    start = row.index(tallest)
+    while start > 0 and tallest[0] - row[start - 1][1] < spacing and row[start][0] - row[start - 1][1] < spacing:
+        start -= 1
+    end = start
+    while end + 1 < len(row) and row[end + 1][0] - row[end][1] < spacing:
+        end += 1
+    row = row[start : end + 1]
+    if len(row) < 2 or row[-1][3] > 0.8 * tallest[3]:
+        return None
+    digits = []
+    for x, x_end, _bottom, _height, index in row[:-1]:
+        mask = labels[:, x:x_end] == index
+        rows = np.flatnonzero(mask.any(axis=1))
+        digits.append(mask[rows[0] : rows[-1] + 1])
+    text = _digit_text(digits)
+    return int(text) if text is not None and 2 <= int(text) <= 99 else None
+
+
+def _digit_text(pieces: list[np.ndarray]) -> str | None:
+    """从左到右的单个数字字形读成字符串；有一个没把握就返回 None。"""
     # TAB 数字（无衬线）和小节号数字（有衬线）两套字形一起比：有的视频速度用衬线体，8 和 2 只靠无衬线模板分不开。
     from video2score.numbers import _DIGIT_BANKS
 
     bank = [(label, template) for label, template in tab_bank() if label.isdigit()] + [(str(digit), template) for digit, template in _DIGIT_BANKS]
     text = ""
-    for _x, piece in sorted(digits, key=lambda item: item[0]):
+    for piece in pieces:
         canvas = _fit_glyph(piece)
         # 有圈的先按圈数挑候选：8 两个圈，0、4、6、9 一个（8 和 2 的相关值常常差不多）。圈可能没封口，没圈的不限。
         allowed = _HOLES.get(_holes(piece), "0123456789")
@@ -194,8 +242,7 @@ def read_tempo(image: np.ndarray, staff_top: float, spacing: float, bars: tuple[
         if score < 0.4:
             return None
         text += label
-    value = int(text)
-    return value if 20 <= value <= 400 else None
+    return text or None
 
 
 _HOLES = {1: "04689", 2: "8"}

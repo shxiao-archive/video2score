@@ -30,6 +30,7 @@ from video2score.tab import (
     mark_arcs,
     onsets,
     read_frets,
+    repeat_signs,
     staccato_dots,
     tab_staff,
     vibratos,
@@ -105,6 +106,9 @@ class ScoreMeasure:
     seen: int = 0
     # 小节库里这一格的干净图（相对作业目录），界面上列有问题的小节时显示。
     image: str | None = None
+    # 反复记号（和 reference.RefMeasure 一样）：左边是正向反复线；右边是反向反复线时这一段一共演几遍（0 是没有）。
+    repeat_start: bool = False
+    repeat_times: int = 0
 
 
 @dataclass
@@ -137,9 +141,12 @@ def job_bass(job_dir: Path) -> bool | None:
 
 
 def score_marks(job_dir: Path) -> Marks:
-    """读乐谱开头的调弦字母（measures/prefix.png）、第一小节行首的调号、上方的速度。"""
+    """读乐谱开头的调弦字母（measures/prefix.png）、第一小节行首的调号、上方的速度。
+
+    谱号、调号单独一段印在反复线前面时，这一段并在前缀图里（measures._header_only），调号从前缀图读。
+    """
     from video2score.clean import CleanMeasure
-    from video2score.header import key_fifths
+    from video2score.header import _header_end, key_fifths
     from video2score.marks import read_tempo, read_tuning
 
     library = json.loads((job_dir / "measures.json").read_text(encoding="utf-8"))
@@ -148,34 +155,56 @@ def score_marks(job_dir: Path) -> Marks:
     first = library[0]
     marks = Marks(bass=job_bass(job_dir))
     tab = tab_staff(first)
+    staff = staff5(first)
     prefix_path = job_dir / "measures" / "prefix.png"
-    if tab is not None and prefix_path.is_file():
-        prefix = read_gray(prefix_path)
+    prefix = read_gray(prefix_path) if prefix_path.is_file() else None
+
+    def clean_measure(image: np.ndarray, record: dict, left: int, right: int) -> CleanMeasure:
+        return CleanMeasure(
+            image=image,
+            spacing=float(record["spacing"]),
+            staff_top=float(record["staff_top"]),
+            lines=tuple(record["lines"]),
+            layout=tuple(tuple(item) for item in record["layout"]),
+            kind=record["kind"],
+            left_bar=left,
+            right_bar=right,
+        )
+
+    start = _staff_start(prefix, list(staff.lines), float(first["spacing"])) if prefix is not None and staff is not None else None
+    head = clean_measure(prefix, first, start, prefix.shape[1]) if start is not None else None
+    if head is not None and _header_end(head) is None:
+        head = None  # 前缀图里没有谱号：只有乐器名、调弦字母
+    if tab is not None and prefix is not None:
         standard = standard_tuning(len(tab.lines), marks.bass)
-        if prefix is not None and standard is not None:
-            marks.tuning = read_tuning(prefix, list(tab.lines), standard)
+        if standard is not None:
+            # 调弦字母在谱号左边。
+            marks.tuning = read_tuning(prefix[:, : head.left_bar] if head is not None else prefix, list(tab.lines), standard)
     heads = []
     for record in library[:3]:
         image = read_gray(job_dir / record["image"])
-        if image is None:
-            continue
-        heads.append(
-            CleanMeasure(
-                image=image,
-                spacing=float(record["spacing"]),
-                staff_top=float(record["staff_top"]),
-                lines=tuple(record["lines"]),
-                layout=tuple(tuple(item) for item in record["layout"]),
-                kind=record["kind"],
-                left_bar=int(record["bars"][0]),
-                right_bar=int(record["bars"][1]),
-            )
-        )
-    if heads:
+        if image is not None:
+            heads.append(clean_measure(image, record, int(record["bars"][0]), int(record["bars"][1])))
+    found = key_signature(prefix, list(staff.lines), staff.spacing, start, prefix.shape[1], marks.bass is not False) if head is not None else None
+    if found is not None:
+        marks.key = found[0]
+    elif heads:
         marks.key = key_fifths(heads)
-        top = heads[0].staff_top + heads[0].lines[0]
-        marks.tempo = read_tempo(heads[0].image, top, heads[0].spacing, (heads[0].left_bar, heads[0].right_bar))
+    # 清洗图上 "=" 的细横常被多帧投票投掉：几张原图也各读一遍，取最多的。
+    top = float(first["staff_top"]) + float(first["lines"][0])
+    paths = [first["image"], first.get("raw"), *(first.get("raws") or [])]
+    images = [read_gray(job_dir / path) for path in paths if path]
+    tempos = [found for image in images if image is not None and (found := read_tempo(image, top, float(first["spacing"]), tuple(first["bars"][:2]))) is not None]
+    marks.tempo = Counter(tempos).most_common(1)[0][0] if tempos else None
     return marks
+
+
+def _staff_start(image: np.ndarray, lines: list[float], spacing: float) -> int | None:
+    """五线谱上下各一个线距里第一列有墨的地方（行首的竖线或谱号）；没有墨返回 None。"""
+    y0 = max(0, int(lines[0] - spacing))
+    y1 = min(image.shape[0], int(lines[-1] + spacing) + 1)
+    columns = np.flatnonzero((image[y0:y1] < 128).any(axis=0)) if y1 > y0 else np.array([])
+    return int(columns[0]) if columns.size else None
 
 
 def read_job(job_dir: Path, progress: Callable[[str], None] | None = None) -> list[ScoreMeasure]:
@@ -206,9 +235,20 @@ def read_job(job_dir: Path, progress: Callable[[str], None] | None = None) -> li
             say(f"读 TAB 和节奏 {index}/{len(loaded)}……")
         candidates.append(_read_measure(record, images, tab, staff, bank, clean, start, thick, opening, bass))
     measures = _choose(candidates)
-    for measure, record in zip(measures, library):
+    for index, (measure, (record, images, tab, staff, clean)) in enumerate(zip(measures, loaded)):
         measure.seconds, measure.seen = record.get("first_seconds"), int(record.get("seen") or 0)
         measure.image = record.get("image")
+        staves = [(item.lines, item.spacing) for item in (staff, tab) if item is not None]
+        image = clean if clean is not None else (images[0] if images else None)
+        measure.repeat_start, end = repeat_signs(image, staves, tuple(record["bars"])) if image is not None else (False, False)
+        measure.repeat_times = 2 if end else 0
+        later = loaded[index + 1] if index + 1 < len(loaded) else None
+        if end and later is not None and images and later[1]:
+            from video2score.marks import read_repeat_times
+
+            # 没印“Nx”就是两遍。
+            times = read_repeat_times(images[0], later[1][0], (float(record["staff_top"]), float(later[0]["staff_top"])), float(record["spacing"]), (int(record["bars"][1]), int(later[0]["bars"][0])))
+            measure.repeat_times = times or 2
     _link_ties(measures)
     _link_vibrato(measures)
     _link_slides(measures)
@@ -335,6 +375,14 @@ def _opening_key(loaded: list[tuple], bass: bool = True) -> int | None:
             continue
         image = clean if clean is not None else images[0]
         found = key_signature(image, list(staff.lines), staff.spacing, record["bars"][0], record["bars"][-1], bass)
+        if found is None and clean is not None:
+            # 清洗图上升号的竖笔偶尔在谱线处断开：一半以上的原图认出同一个调号也算。
+            votes = Counter(
+                item[0]
+                for frame in images
+                if (item := key_signature(frame, list(staff.lines), staff.spacing, record["bars"][0], record["bars"][-1], bass)) is not None
+            ).most_common(1)
+            return votes[0][0] if votes and votes[0][1] * 2 > len(images) else None
         return found[0] if found is not None else None
     return None
 
@@ -429,6 +477,12 @@ def _read_measure(
         same = [item for item in found if item is not None and item[0] == opening]
         if len(same) * 2 > len(images):
             key = max(same, key=lambda item: item[1])
+    elif key is not None and clean is not None and abs(key[0]) == 1 and key[0] != opening and len(images) >= 3:
+        # 清洗图上认出只有一个升降号的别的调号：一半以上的原图也认出它才算。小节线后面紧挨着的八分音符在清洗图上也会像个降号。
+        # 两个以上的不这样查：原图上调号常被光标、高亮压住，真的转调多半帧认不出。
+        found = [key_signature(frame, list(staff.lines), staff.spacing, bars[0], bars[-1], bass) for frame in images]
+        if sum(item is not None and item[0] == key[0] for item in found) * 2 <= len(images):
+            key = None
     if key is not None:
         start = max(start or 0, key[1])
     # 清洗图也当一帧读：只有一两帧原图时，原图上被背景盖住的音清洗图上常常是好的。
@@ -1529,6 +1583,8 @@ def write_musicxml(
                 number += 1
             first = written is None
             out.append(f'    <measure number="{number}">')
+            if repeat == 0 and measure.repeat_start:
+                out.append('      <barline location="left"><bar-style>heavy-light</bar-style><repeat direction="forward"/></barline>')
             rest_group = measure.rests_after + 1 if repeat == 0 and measure.rests_after else 0
             if time != written or first or rest_group or fifths != written_key:
                 changed = time if time != written or first else None
@@ -1552,6 +1608,9 @@ def write_musicxml(
             out.append(f"      <backup><duration>{int(total * 4 * DIVISIONS)}</duration></backup>")
             for note in notes:
                 out.extend(_note_xml(note, tuning, fifths=fifths, staff=2))
+            if repeat == measure.rests_after and measure.repeat_times:
+                times = f' times="{measure.repeat_times}"' if measure.repeat_times > 2 else ""
+                out.append(f'      <barline location="right"><bar-style>light-heavy</bar-style><repeat direction="backward"{times}/></barline>')
             out.append("    </measure>")
     out.append("  </part>")
     out.append("</score-partwise>")

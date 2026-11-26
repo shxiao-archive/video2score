@@ -1019,7 +1019,7 @@ def _slash_direction(glyph: _Glyph) -> str | None:
 def _read_glyph(glyph: _Glyph, region: np.ndarray, bank: Bank) -> tuple[str | None, float, np.ndarray]:
     patch = np.where(glyph.mask, region[glyph.y0 : glyph.y1, glyph.x0 : glyph.x1], 0)
     canvas = fit_gray(patch)
-    label, score, margin = classify(canvas, bank, narrow=glyph.width < 0.5 * glyph.height)
+    label, score, margin = classify(canvas, bank, narrow=_narrow(glyph))
     if label is None or score < 0.8 or margin < MIN_MARGIN:
         # 字边上粘着一两个像素的残渣（弦线、背景抹剩的）：字框宽出一列，缩放后笔画整体错开，相关值掉得厉害。
         # 去掉边上只有一两个像素的列再认一次，更像才用。
@@ -1027,7 +1027,7 @@ def _read_glyph(glyph: _Glyph, region: np.ndarray, bank: Bank) -> tuple[str | No
         if trimmed is not None:
             patch2 = np.where(trimmed.mask, region[trimmed.y0 : trimmed.y1, trimmed.x0 : trimmed.x1], 0)
             canvas2 = fit_gray(patch2)
-            label2, score2, margin2 = classify(canvas2, bank, narrow=trimmed.width < 0.5 * trimmed.height)
+            label2, score2, margin2 = classify(canvas2, bank, narrow=_narrow(trimmed))
             if label2 is not None and score2 >= MIN_SCORE and margin2 >= MIN_MARGIN and score2 > score:
                 return label2, score2, canvas2
     if label is None or score < MIN_SCORE or margin < MIN_MARGIN:
@@ -1081,11 +1081,18 @@ def _segment_note(
     )
 
 
+def _narrow(glyph: _Glyph) -> bool | None:
+    """宽不到高的一半只能是 1，到 0.6 倍以上不会是 1；夹在中间不限（粗体带大旗头的 1 宽到 0.55 倍，最窄的别的数字 0.56 倍）。"""
+    if glyph.width < 0.5 * glyph.height:
+        return True
+    return False if glyph.width >= 0.6 * glyph.height else None
+
+
 def classify(canvas: np.ndarray, bank: Bank, narrow: bool | None = None) -> tuple[str | None, float, float]:
     """(字, 最像的相关值, 和第二像的数字的差距)。
 
     数字之间比差距。字母、括号要比最像的数字明显更像才算：1 和 T、) 本来就长得近。
-    narrow 给出字形宽高：窄（宽不到高的一半）的数字只能是 1，宽的不会是 1。
+    narrow 给出字形宽高：窄的数字只能是 1，宽的不会是 1，None 不限（见 _narrow）。
     很多字体里 1 和 7 的相关值只差一点点，靠宽窄一下就分开了。
     """
     scores: dict[str, float] = {}
@@ -1177,17 +1184,18 @@ def adapted_tab_bank(
             canvases.append(fit_gray(patch))
     clusters = _cluster(canvases)
     labelled: list[tuple[np.ndarray, str, float, float]] = []
+    weights: list[tuple[int, dict[str, float]]] = []  # 每类的字形数、各数字的相关值
     for members in clusters:
         if len(members) < 3:
             continue
         centroid = np.mean(np.stack([canvases[index] for index in members]), axis=0).astype(np.float32)
         scores = _digit_scores(centroid, bank)
-        ranked = sorted(scores.items(), key=lambda item: -item[1])
-        margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else 1.0
-        labelled.append((centroid, ranked[0][0], ranked[0][1], margin))
+        label, top, margin = _ranked(scores)
+        labelled.append((centroid, label, top, margin))
+        weights.append((len(members), scores))
     # 几乎一样的几类连成一组：同一个数字被贪心聚类分成了几类（谱面小、放大以后，同一个数字落在原图像素格上的位置不同，
-    # 糊开的样子也不同）。一组按组里最有把握的那一类定数字，别的类跟着它。单独定的话把握小的一类可能被认成别的数字（8 认成 6），
-    # 和它像的类再跟着它，会一路传错。
+    # 糊开的样子也不同；字宽差一个像素，整个字错开一列）。一组按各类的相关值按字形数加权合起来定数字，别的类跟着它。
+    # 单独定的话把握小的一类可能被认成别的数字（8 认成 6），和它像的类再跟着它，会一路传错。
     group = list(range(len(labelled)))
     def root(index: int) -> int:
         while group[index] != index:
@@ -1195,33 +1203,58 @@ def adapted_tab_bank(
         return index
     for i in range(len(labelled)):
         for j in range(i):
-            if _glyph_corr(labelled[i][0], labelled[j][0]) >= _TWIN:
+            if _shifted_corr(labelled[i][0], labelled[j][0]) >= _TWIN:
                 group[root(i)] = root(j)
     members: dict[int, list[int]] = {}
     for index in range(len(labelled)):
         members.setdefault(root(index), []).append(index)
     # 先定把握大的，再定把握小的。
-    claimed: list[tuple[str, np.ndarray]] = []
+    claimed: list[tuple[str, np.ndarray, bool]] = []  # (数字, 字形, 定得有没有把握)
     own: list[tuple[str, np.ndarray]] = []
     for indices in sorted(members.values(), key=lambda indices: -max(labelled[index][3] for index in indices)):
         best = max(indices, key=lambda index: labelled[index][3])
-        centroid, _label, top, margin = labelled[best]
-        chosen = _claim(centroid, top, margin, claimed, bank)
+        total = sum(weights[index][0] for index in indices)
+        scores = {
+            digit: sum(weights[index][0] * weights[index][1].get(digit, 0.0) for index in indices) / total
+            for digit in weights[best][1]
+        }
+        _label, top, margin = _ranked(scores)
+        centroid = labelled[best][0]
+        chosen = _claim(centroid, top, margin, claimed, scores)
         if chosen is None:
             continue
+        sure = chosen == _label and margin >= _CLEAR_MARGIN
         for index in indices:
             # 跟着组里定的数字走，只要本身认得出是个数字。
             if index == best or labelled[index][2] >= MIN_SCORE:
-                claimed.append((chosen, labelled[index][0]))
+                claimed.append((chosen, labelled[index][0], sure))
                 own.append((chosen, labelled[index][0]))
     return tuple(own) + bank
 
 
+def _shifted_corr(left: np.ndarray, right: np.ndarray) -> float:
+    """左右错开一列以内最像的相关值：字宽差一个像素，缩到 12 列宽的画布上整个字就错开一列，直接比只剩 0.6 左右。"""
+    best = _glyph_corr(left, right)
+    for shift in (-1, 1):
+        moved = np.zeros_like(right)
+        if shift > 0:
+            moved[:, shift:] = right[:, :-shift]
+        else:
+            moved[:, :shift] = right[:, -shift:]
+        best = max(best, _glyph_corr(left, moved))
+    return best
+
+
+def _ranked(scores: dict[str, float]) -> tuple[str, float, float]:
+    """(最像的数字, 它的相关值, 比第二像的高多少)。"""
+    ranked = sorted(scores.items(), key=lambda item: -item[1])
+    return ranked[0][0], ranked[0][1], ranked[0][1] - ranked[1][1] if len(ranked) > 1 else 1.0
+
+
 def _claim(
-    centroid: np.ndarray, top: float, margin: float, claimed: list[tuple[str, np.ndarray]], bank: Bank
+    centroid: np.ndarray, top: float, margin: float, claimed: list[tuple[str, np.ndarray, bool]], scores: dict[str, float]
 ) -> str | None:
     """给一类字形定数字：最像的数字被形状不同的类占了、自己又没有明显把握时，退到下一个。定不了是 None。"""
-    scores = _digit_scores(centroid, bank)
     for label, score in sorted(scores.items(), key=lambda item: -item[1])[:3]:
         # 退到下一个数字只在它和最像的那个差不多、这一类字形本身又清楚时才行（MuseScore 的 9 和 0 只差 0.01）。不硬给：
         # 压在视频画面上糊了一点的 "8" 自成一小类，8、6 都被别的类占了，会一路退成 0。
@@ -1230,8 +1263,9 @@ def _claim(
         if score < top and top < 0.8:
             # 本身就认不太清的一类（背景糊过的几个字形）不往下退。
             break
+        # 只有定得有把握的类才占得住：两类都没把握时（同一个数字一类压着弦线、一类干净），谁先定不说明另一类是别的数字。
         taken = any(
-            other_label == label and _glyph_corr(centroid, other) < 0.85 for other_label, other in claimed
+            other_label == label and sure and _glyph_corr(centroid, other) < 0.85 for other_label, other, sure in claimed
         )
         if taken and margin < _CLEAR_MARGIN:
             continue
@@ -1711,6 +1745,47 @@ def staccato_dots(image: np.ndarray, staff: TabStaff, bars: tuple[int, int] | No
             continue
         found.append(x0 + x + w / 2.0)
     return found
+
+
+
+def repeat_signs(image: np.ndarray, staves: list[tuple[tuple[float, ...], float]], bars: tuple[int, ...]) -> tuple[bool, bool]:
+    """小节两头的反复记号：(左边是正向反复线, 右边是反向反复线)。staves 是 (谱线 y, 线距)，五线谱、TAB 各一组。
+
+    反复线是粗细两道竖线加两个实心圆点，圆点在线间、上下对称地夹着谱表中线，和小节线隔不到 2.5 个线距
+    （五线谱在第 2、3 间，四线 TAB 在第 1、3 间）。每组谱线上都找到这样一对点才算，跳音、附点只有一个点。
+    """
+    left = right = bool(staves)
+    for lines, spacing in staves:
+        left = left and _dot_pair(image, lines, spacing, bars[0], bars[0] + 2.5 * spacing)
+        right = right and _dot_pair(image, lines, spacing, bars[-1] - 2.5 * spacing, bars[-1] + 1)
+    return left, right
+
+
+def _dot_pair(image: np.ndarray, lines: tuple[float, ...], spacing: float, x0: float, x1: float) -> bool:
+    height, width = image.shape[:2]
+    left, right = max(0, int(x0)), min(width, int(x1))
+    top, bottom = max(0, int(lines[0])), min(height, int(lines[-1]) + 1)
+    ink = (image[top:bottom, left:right] < 128).astype(np.uint8)
+    if ink.size == 0:
+        return False
+    for y in lines:  # 抹掉谱线，线间的圆点才是单独一块
+        row = int(round(y)) - top
+        ink[max(0, row - 1) : row + 2] = 0
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    dots = []
+    for index in range(1, count):
+        x, y, w, h, area = (int(value) for value in stats[index])
+        if not (0.2 * spacing <= w <= 0.65 * spacing and 0.2 * spacing <= h <= 0.65 * spacing and 0.6 <= w / h <= 1.6):
+            continue
+        center = top + y + h / 2.0
+        if area >= 0.55 * w * h and min(abs(center - line) for line in lines) >= 0.25 * spacing:
+            dots.append((left + x + w / 2.0, center))
+    middle = (lines[0] + lines[-1]) / 2.0
+    return any(
+        abs(a[0] - b[0]) < 0.3 * spacing and abs((a[1] + b[1]) / 2.0 - middle) < 0.3 * spacing and 0.7 * spacing < b[1] - a[1] < 2.4 * spacing
+        for a in dots
+        for b in dots
+    )
 
 
 def bends(

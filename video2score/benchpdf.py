@@ -20,6 +20,7 @@ from video2score.compare import align_structure, compare, compare_xml
 from video2score.inkcheck import check_job
 from video2score.jobs import JOBS_DIR, load_manifest, save_manifest
 from video2score.reference import read_reference
+from video2score.refxml import expands_like
 from video2score.run import Options, run, write_tab_score
 from video2score.tabscore import read_job
 from video2score.xmldiff import run_diff
@@ -64,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
                 rows.append(f"{folder.name}（{job_dir.name}，{time.time() - started:.0f} 秒）\n  {bars}\n  {ink.summary()}")
                 print(rows[-1], flush=True)
                 continue
-            reference = read_reference(answers[0])
+            xml = answers[0].suffix.lower() in (".musicxml", ".xml")
+            reference = read_reference(answers[0], expands_like(job_dir / "score.musicxml", answers[0]) if xml else True)
             structure = align_structure(measures, reference)
             direct = None
             if answers[0].suffix.lower() in (".musicxml", ".xml"):
